@@ -149,9 +149,6 @@ Spravuje zvukový výstup a inicializaci.
   - `Performer.cpp`: Alokace hlasů a přebírání (mixle_queue) pro `Sampler`.
   - `DeviceVoice.cpp`: Správa not a velocity pro `SamplerVoice`.
   - `midi.cpp`: Robustní parsování MIDI pro `MidiProcessor`.
-- **Formát vzorků**: Názvy ve formátu `mNNN-NOTA-DbLvl-X.wav`, kde dB je negativní (0 = plná hlasitost).
+- **Formát vzorků**: Názvy ve formátu `mNNN-NOTA-DbLvl-X.wav`, kde dB je negativní (DbLvl-0 = plná hlasitost).
 - **JUCE fórum**: Inspirace např. z [Simple Sampler Plugin](https://forum.juce.com/t/simple-sampler-plugin/23456).
 
-## Možnost stažení
-
-Markdown soubor s popisem projektu lze stáhnout zde: [IthacaPlayer.md](#).
