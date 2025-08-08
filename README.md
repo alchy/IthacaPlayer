@@ -23,7 +23,7 @@ Přehled
 IthacaPlayer je MIDI samplovací přehrávač v JUCE frameworku, kombinující správu .wav vzorků (s negativními dB úrovněmi) a robustní zpracování MIDI z Python skriptu sample-player.py a C++ kódu (Performer, Midi, DeviceVoice). Podporuje polyfonní přehrávání, mapování velocity, generování chybějících vzorků a zpracování MIDI událostí (Note On/Off, Pitch Wheel, Control Change, SysEx).
 Struktura projektu
 
-===
+---
 
 Třída Config (Config.h)
 
@@ -56,7 +56,7 @@ Vstup: Žádný
 Výstup: Název dočasné složky (samples_tmp)
 Řeší: Určení složky pro generované vzorky
 
-===
+---
 
 Třída AudioFile (AudioFile.h, AudioFile.cpp)
 
