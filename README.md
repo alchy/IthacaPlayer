@@ -152,3 +152,398 @@ Spravuje zvukový výstup a inicializaci.
 - **Formát vzorků**: Názvy ve formátu `mNNN-NOTA-DbLvl-X.wav`, kde dB je negativní (DbLvl-0 = plná hlasitost).
 - **JUCE fórum**: Inspirace např. z [Simple Sampler Plugin](https://forum.juce.com/t/simple-sampler-plugin/23456).
 
+---
+
+# Meta-kód pro IthacaPlayer
+
+## Přehled
+
+Níže je meta-kód pro metody tříd projektu `IthacaPlayer`, samplovacího přehrávače v JUCE, inspirovaného `sample-player.py` a C++ třídami `Performer`, `Midi`, `DeviceVoice`. Meta-kód popisuje algoritmické kroky pro každou metodu uvedenou v `README.md`, zohledňuje negativní dB úrovně vzorků (např. `DbLvl-20`, 0 = plná hlasitost) a principy robustního MIDI zpracování, alokace hlasů a správy vzorků. Je určen jako zadání pro vývojáře C++.
+
+## Meta-kód podle tříd
+
+### Config (`Config.h`)
+
+- **velocityLevels**
+  ```
+  VRAŤ konstantu 8 // Počet vrstev velocity
+  ```
+
+- **midiVelocityMax**
+  ```
+  VRAŤ konstantu 127 // Max MIDI velocity
+  ```
+
+- **maxPitchShift**
+  ```
+  VRAŤ konstantu 12 // Max posun výšky (±12 půltónů)
+  ```
+
+- **midiNoteRange**
+  ```
+  VRAŤ juce::Range<int>{21, 109} // Rozsah MIDI not (A0–C8)
+  ```
+
+- **tempDirName**
+  ```
+  VRAŤ juce::String "samples_tmp" // Název dočasné složky
+  ```
+
+### AudioFile (`AudioFile.h`, `AudioFile.cpp`)
+
+- **Konstruktor**
+  ```
+  NASTAV file = vstupní soubor
+  NASTAV midiNote = vstupní MIDI nota
+  NASTAV noteName = vstupní název noty
+  NASTAV dbLevel = vstupní dB úroveň (negativní nebo 0)
+  ```
+
+- **fromFile**
+  ```
+  ZÍSKEJ název souboru z file.getFileName()
+  POKUD název odpovídá vzoru "m(\\d{3})-([A-G]#?_\\d)-DbLvl([-]?\\d+)\\.wav"
+    EXTRAKUJ midiNote jako číslo z první skupiny
+    EXTRAKUJ noteName jako řetězec z druhé skupiny
+    EXTRAKUJ dbLevel jako číslo z třetí skupiny (ověř negativní nebo 0)
+    VRAŤ nový AudioFile(file, midiNote, noteName, dbLevel)
+  JINAK
+    VRAŤ nullptr
+  ```
+
+### VelocityMapper (`VelocityMapper.h`, `VelocityMapper.cpp`)
+
+- **Konstruktor**
+  ```
+  INICIALIZUJ velocityMap jako prázdnou std::map<std::pair<int, int>, juce::File>
+  INICIALIZUJ availableNotes jako prázdnou std::set<int>
+  ```
+
+- **buildVelocityMap**
+  ```
+  LOGUJ "Prohledávám složku: " + inputDir.getFullPathName()
+  INICIALIZUJ noteDbMap jako std::map<int, std::vector<std::pair<int, juce::File>>>
+  PRO každý soubor v DirectoryIterator(inputDir, "*.wav")
+    POKUD AudioFile::fromFile(soubor) vrátí platný audioFile
+      PŘIDEJ (audioFile.dbLevel, audioFile.file) do noteDbMap[audioFile.midiNote]
+      PŘIDEJ audioFile.midiNote do availableNotes
+    KONEC
+  PRO každý (midiNote, dbFiles) v noteDbMap
+    SEŘAĎ dbFiles podle dbLevel (vzestupně, negativní hodnoty)
+    ZÍSKEJ velocityRanges z getVelocityRanges(dbFiles.size())
+    PRO každý ((dbLevel, file), (vStart, vEnd)) v zip(dbFiles, velocityRanges)
+      PRO velocity od vStart do vEnd
+        NASTAV velocityMap[{midiNote, velocity}] = file
+      KONEC
+    KONEC
+  LOGUJ "Mapa velocity vytvořena pro " + availableNotes.size() + " not"
+  ```
+
+- **getSampleForVelocity**
+  ```
+  NAJDI (midiNote, velocity) v velocityMap
+  POKUD nalezeno
+    VRAŤ odpovídající juce::File
+  JINAK
+    VRAŤ prázdný juce::File
+  ```
+
+- **addGeneratedSample**
+  ```
+  PRO velocity od velocityRange.first do velocityRange.second
+    NASTAV velocityMap[{midiNote, velocity}] = file
+  KONEC
+  PŘIDEJ midiNote do availableNotes
+  ```
+
+- **getVelocityRanges**
+  ```
+  INICIALIZUJ ranges jako std::vector<std::pair<int, int>>
+  NASTAV step = Config::midiVelocityMax / levelCount
+  PRO i od 0 do levelCount-1
+    NASTAV start = zaokrouhli(i * step)
+    NASTAV end = (i == levelCount-1) ? Config::midiVelocityMax-1 : zaokrouhli((i+1) * step)-1
+    PŘIDEJ (start, end) do ranges
+  KONEC
+  VRAŤ ranges
+  ```
+
+### SampleGenerator (`SampleGenerator.h`, `SampleGenerator.cpp`)
+
+- **Konstruktor**
+  ```
+  NASTAV velocityMapper = vstupní reference
+  ```
+
+- **generateMissingNotes**
+  ```
+  PRO note v Config::midiNoteRange
+    POKUD velocityMapper.getSampleForVelocity(note, 64) existuje
+      POKRAČUJ
+    KONEC
+    NASTAV nearestNote = findNearestAvailableNote(note)
+    POKUD nearestNote == -1
+      POKRAČUJ
+    KONEC
+    NASTAV baseFile = velocityMapper.getSampleForVelocity(nearestNote, 64)
+    POKUD baseFile neexistuje
+      POKRAČUJ
+    KONEC
+    NASTAV semitoneShift = note - nearestNote
+    POKUD abs(semitoneShift) > Config::maxPitchShift
+      POKRAČUJ
+    KONEC
+    NASTAV newFile = tempDir.getChildFile("m" + formátuj(note, "03d") + "-generated-DbLvl0.wav")
+    VOLEJ pitchShiftSample(baseFile, newFile, semitoneShift)
+    VOLEJ velocityMapper.addGeneratedSample(note, {0, Config::midiVelocityMax-1}, newFile)
+  KONEC
+  ```
+
+- **pitchShiftSample**
+  ```
+  INICIALIZUJ formatManager jako AudioFormatManager
+  REGISTRUJ základní formáty (WAV)
+  VYTVOŘ reader = formatManager.createReaderFor(input)
+  POKUD reader neexistuje
+    VRAŤ
+  KONEC
+  VYTVOŘ buffer s reader.numChannels, reader.lengthInSamples
+  ČTI reader do buffer
+  NASTAV ratio = pow(2.0, semitones / 12.0)
+  VYTVOŘ resampled buffer s reader.numChannels, buffer.numSamples / ratio
+  PRO každý kanál v buffer
+    ZPRACUJ interpolator s ratio, buffer[kanál], resampled[kanál]
+  KONEC
+  VYTVOŘ writer = WavAudioFormat.createWriterFor(output, reader.sampleRate, reader.numChannels, 16)
+  POKUD writer existuje
+    ZAPIŠ resampled do writer
+  KONEC
+  ```
+
+- **findNearestAvailableNote**
+  ```
+  NASTAV minDistance = Config::maxPitchShift + 1
+  NASTAV nearestNote = -1
+  PRO note v velocityMapper.availableNotes
+    POKUD abs(note - targetNote) <= Config::maxPitchShift A abs(note - targetNote) < minDistance
+      NASTAV minDistance = abs(note - targetNote)
+      NASTAV nearestNote = note
+    KONEC
+  KONEC
+  VRAŤ nearestNote
+  ```
+
+### MidiProcessor (`MidiProcessor.h`, `MidiProcessor.cpp`)
+
+- **Konstruktor**
+  ```
+  NASTAV synthesiser = vstupní reference
+  ```
+
+- **handleIncomingMidiMessage**
+  ```
+  POKUD message.isNoteOn()
+    VOLEJ synthesiser.noteOn(message.getChannel(), message.getNoteNumber(), message.getVelocity())
+    LOGUJ "Note On: " + message.getNoteNumber() + ", Velocity: " + message.getVelocity()
+  NEBO POKUD message.isNoteOff()
+    VOLEJ synthesiser.noteOff(message.getChannel(), message.getNoteNumber(), message.getVelocity(), true)
+    LOGUJ "Note Off: " + message.getNoteNumber()
+  NEBO POKUD message.isPitchWheel()
+    NASTAV pitchWheelValue = message.getPitchWheelValue() - 8192
+    VOLEJ synthesiser.handlePitchWheel(message.getChannel(), pitchWheelValue)
+  NEBO POKUD message.isController()
+    LOGUJ "Control Change: " + message.getControllerNumber() + ", Value: " + message.getControllerValue()
+    // Mapuj na SysEx podle potřeby (inspirováno MidiParser::ControlChange)
+  NEBO POKUD message.isSysEx()
+    // Parsuj SysEx data (inspirováno MidiParser::SystemExclusive)
+    LOGUJ "SysEx přijato"
+  KONEC
+  ```
+
+- **start**
+  ```
+  NASTAV midiInput = MidiInput::openDevice(deviceName, this)
+  POKUD midiInput existuje
+    VOLEJ midiInput->start()
+  KONEC
+  ```
+
+- **stop**
+  ```
+  POKUD midiInput existuje
+    VOLEJ midiInput->stop()
+    NASTAV midiInput = nullptr
+  KONEC
+  ```
+
+### SamplerVoice (`SamplerVoice.h`, `SamplerVoice.cpp`)
+
+- **Konstruktor**
+  ```
+  NASTAV velocityMapper = vstupní reference
+  NASTAV isPlaying = false
+  NASTAV currentSample = 0
+  ```
+
+- **canPlaySound**
+  ```
+  VRAŤ dynamic_cast<SamplerSound*>(sound) != nullptr
+  ```
+
+- **startNote**
+  ```
+  NASTAV samplerSound = dynamic_cast<SamplerSound*>(sound)
+  POKUD samplerSound neexistuje
+    VRAŤ
+  KONEC
+  NASTAV file = velocityMapper.getSampleForVelocity(midiNoteNumber, velocity * Config::midiVelocityMax)
+  POKUD file neexistuje
+    VRAŤ
+  KONEC
+  INICIALIZUJ formatManager jako AudioFormatManager
+  REGISTRUJ základní formáty (WAV)
+  NASTAV reader = formatManager.createReaderFor(file)
+  POKUD reader existuje
+    NASTAV velikost buffer na reader.numChannels, reader.lengthInSamples
+    ČTI reader do buffer
+    NASTAV currentSample = 0
+    NASTAV isPlaying = true
+  KONEC
+  ```
+
+- **stopNote**
+  ```
+  POKUD allowTailOff
+    // Implementuj obálku pokud potřeba
+  JINAK
+    VOLEJ clearCurrentNote()
+    NASTAV isPlaying = false
+  KONEC
+  ```
+
+- **renderNextBlock**
+  ```
+  POKUD NOT isPlaying NEBO NOT reader
+    VRAŤ
+  KONEC
+  PRO i od 0 do numSamples A currentSample < buffer.numSamples
+    PRO každý kanál v outputBuffer
+      PŘIDEJ buffer[kanál % buffer.numChannels, currentSample] do outputBuffer[kanál, startSample + i]
+    KONEC
+    INKREMENTUJ currentSample
+  KONEC
+  POKUD currentSample >= buffer.numSamples
+    VOLEJ clearCurrentNote()
+    NASTAV isPlaying = false
+  KONEC
+  ```
+
+- **pitchWheelMoved**
+  ```
+  NASTAV pitchWheelValue = newPitchWheelValue - 8192
+  // Aplikuj na přehrávání pokud implementováno
+  ```
+
+- **controllerMoved**
+  ```
+  LOGUJ "Controller: " + controllerNumber + ", Value: " + newControllerValue
+  // Aktualizuj parametry přehrávání pokud potřeba
+  ```
+
+### Sampler (`Sampler.h`, `Sampler.cpp`)
+
+- **Konstruktor**
+  ```
+  VOLEJ velocityMapper.buildVelocityMap(inputDir)
+  NASTAV tempDir = inputDir.getSiblingFile(Config::tempDirName)
+  VYTVOŘ generator jako SampleGenerator(velocityMapper)
+  VOLEJ generator.generateMissingNotes(tempDir)
+  PŘIDEJ nový SamplerSound("default", Config::midiNoteRange.start, Config::midiNoteRange.end)
+  PRO i od 0 do 15
+    PŘIDEJ nový SamplerVoice(velocityMapper)
+  KONEC
+  ```
+
+- **addSound**
+  ```
+  VOLEJ Synthesiser::addSound(sound) // Zděděno z JUCE
+  ```
+
+- **addVoice**
+  ```
+  VOLEJ Synthesiser::addVoice(voice) // Zděděno z JUCE
+  ```
+
+- **noteOn**
+  ```
+  VOLEJ Synthesiser::noteOn(midiChannel, midiNoteNumber, velocity) // Zděděno, spustí SamplerVoice::startNote
+  ```
+
+- **noteOff**
+  ```
+  VOLEJ Synthesiser::noteOff(midiChannel, midiNoteNumber, velocity, allowTailOff) // Zděděno, spustí SamplerVoice::stopNote
+  ```
+
+- **handlePitchWheel**
+  ```
+  VOLEJ Synthesiser::handlePitchWheel(midiChannel, wheelValue) // Zděděno, spustí SamplerVoice::pitchWheelMoved
+  ```
+
+### SamplerSound (`Sampler.h`)
+
+- **Konstruktor**
+  ```
+  NASTAV name = vstupní název
+  NASTAV noteRange = {minNote, maxNote}
+  ```
+
+- **appliesToNote**
+  ```
+  VRAŤ noteRange.contains(midiNoteNumber)
+  ```
+
+- **appliesToChannel**
+  ```
+  VRAŤ true
+  ```
+
+### MainAudioComponent (`MainAudioComponent.h`, `MainAudioComponent.cpp`)
+
+- **Konstruktor**
+  ```
+  VYTVOŘ sampler s inputDir, cleanTemp
+  VYTVOŘ midiProcessor s sampler
+  VOLEJ setAudioChannels(0, 2) // Stereo výstup
+  VOLEJ midiProcessor.start(první název MIDI zařízení)
+  ```
+
+- **prepareToPlay**
+  ```
+  VOLEJ sampler.prepareToPlay(samplesPerBlockExpected, sampleRate)
+  ```
+
+- **getNextAudioBlock**
+  ```
+  VOLEJ sampler.renderNextBlock(bufferToFill.buffer, bufferToFill.startSample, bufferToFill.numSamples)
+  ```
+
+- **releaseResources**
+  ```
+  // Bez operací nebo uvolni zdroje pokud potřeba
+  ```
+
+- **Destruktor**
+  ```
+  VOLEJ midiProcessor.stop()
+  VOLEJ shutdownAudio()
+  ```
+
+## Poznámky k implementaci
+
+- **JUCE moduly**: Použij `juce_core`, `juce_audio_basics`, `juce_audio_formats`, `juce_audio_devices`, `juce_audio_utils`.
+- **Inspirace C++ kódem**:
+  - `Performer.cpp`: Implementuj přebírání hlasů v `Sampler` podle `mixle_queue`.
+  - `DeviceVoice.cpp`: Správa not a velocity v `SamplerVoice` podle `play` a `velocity`.
+  - `midi.cpp`: Robustní parsování MIDI v `MidiProcessor` podle `MidiParser::Parse`.
+- **Vzorky**: Formát `mNNN-NOTA-DbLvl-X.wav`, dB negativní (0 = plná hlasitost).
+- **JUCE fórum**: Inspirace např. z https://forum.juce.com/t/pitch-shifting-samples/12345 pro `pitchShiftSample`.
