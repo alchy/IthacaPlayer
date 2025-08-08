@@ -20,7 +20,7 @@ Vzorky musí dodržovat pojmenovací konvenci:
 mNNN-NOTA-DbLvl-X.wav
 ```
 - `NNN`: MIDI nota (000-127)
-- `NOTA`: Název noty (např. C_4, Bb_5)
+- `NOTA`: Název noty (např. C_4, B#_5)
 - `X`: dB úroveň (negativní hodnoty, 0 = plná hlasitost)
 - Příklad: `m060-C_4-DbLvl-20.wav`
 
