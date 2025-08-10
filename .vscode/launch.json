@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch AudioPluginHost",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/JUCE/build/extras/AudioPluginHost/AudioPluginHost_artefacts/Debug/AudioPluginHost.exe",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "CMake: build"
+        }
+    ]
+}
