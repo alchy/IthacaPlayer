@@ -13,7 +13,7 @@ cmake --build build --target AudioPluginHost
 # Visual Studio Code
 
 Build the Project 
-- Terminal > Run Build Task (or press Ctrl+Shift+B
+- Terminal > Run Build Task (or press Ctrl+Shift+B)
 
 Run Without Debugging 
 - 
