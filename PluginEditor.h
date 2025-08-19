@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "IthacaSources/Editor/IthacaEditor.h"  // Přidáno: Include pro náš custom editor (zdůvodnění: Delegování GUI metod).
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor final : public juce::AudioProcessorEditor
@@ -14,9 +15,8 @@ public:
     void resized() override;
 
 private:
-    // This reference is provided as a quick way for your editor to
-    // access the processor object that created it.
     AudioPluginAudioProcessor& processorRef;
+    std::unique_ptr<IthacaEditor> ithacaEditor;  // Slouží k delegování custom GUI logiky Ithaca (zdůvodnění: Smart pointer pro správu paměti).
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };

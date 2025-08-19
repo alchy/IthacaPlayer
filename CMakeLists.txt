@@ -67,10 +67,29 @@ juce_generate_juce_header(IthacaPlayer)
 # Finally, we supply a list of source files that will be built into the target. This is a standard
 # CMake command.
 
+# OPRAVENO: Přidány všechny implementační soubory z IthacaSources/
+# Zdůvodnění: Linker potřebuje znát všechny .cpp soubory, nejen hlavičky
 target_sources(IthacaPlayer
     PRIVATE
+        # Hlavní plugin soubory
         PluginEditor.cpp
-        PluginProcessor.cpp)
+        PluginProcessor.cpp
+        
+        # IthacaSources implementace - jsou potřeba pro linkování
+        IthacaSources/Processor/IthacaProcessor.cpp
+        IthacaSources/Editor/IthacaEditor.cpp
+        
+        # Poznámka: DebugLogger.h a Config.h jsou header-only, 
+        # takže nepotřebují .cpp soubory
+)
+
+# Přidáno: Include directories pro IthacaSources
+# Zdůvodnění: Umožňuje relativní includes v rámci IthacaSources struktury
+target_include_directories(IthacaPlayer
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/IthacaSources
+)
 
 # `target_compile_definitions` adds some preprocessor definitions to our target. In a Projucer
 # project, these might be passed in the 'Preprocessor Definitions' field. JUCE modules also make use

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "IthacaSources/Processor/IthacaProcessor.h"  // Přidáno: Include pro náš custom processor (zdůvodnění: Delegování metod na Ithaca).
 
 //==============================================================================
 class AudioPluginAudioProcessor final : public juce::AudioProcessor
@@ -43,6 +44,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
 private:
-    //==============================================================================
+    std::unique_ptr<IthacaProcessor> ithacaProcessor;  // Slouží k delegování custom logiky Ithaca synthu (zdůvodnění: Smart pointer pro automatickou správu paměti).
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
 };
