@@ -2,105 +2,130 @@
 
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
+#include <atomic>
 #include "Logger.h"
 
 /**
- * ActiveNote - struktura reprezentující aktivní MIDI notu.
- * Obsahuje základní atributy pro správu stavu noty.
+ * ActiveNote - struktura reprezentující aktivní MIDI notu
+ * Optimalizovaná pro rychlý přístup a cache efficiency
  */
 struct ActiveNote {
-    uint8_t key;           // MIDI nota (0-127)
-    uint8_t velocity;      // Velocity (0-127)
-    uint8_t channel;       // MIDI channel (0-15)
-    bool isActive;         // Flag indikující aktivní stav noty
-    uint32_t triggerTime;  // Timestamp spuštění noty (pro voice stealing)
+    uint8_t key;                // MIDI nota (0-127)
+    uint8_t velocity;           // Velocity (0-127)
+    uint8_t channel;            // MIDI channel (0-15)
+    bool isActive;              // Flag indikující aktivní stav noty
+    uint32_t triggerTime;       // Timestamp spuštění noty (pro voice stealing)
     
+    // Konstruktor s výchozími hodnotami
     ActiveNote() : key(0), velocity(0), channel(0), isActive(false), triggerTime(0) {}
+    
+    // Reset metoda pro opětovné použití
+    void reset() {
+        key = 0;
+        velocity = 0;
+        channel = 0;
+        isActive = false;
+        triggerTime = 0;
+    }
 };
 
 /**
- * MidiStateManager - třída pro centrální správu MIDI stavu.
- * Zpracovává MIDI události, ukládá stavy not a controllerů, používá fronty pro události.
+ * NoteQueue - optimalizovaný circular buffer pro MIDI noty
+ * Používá uint8 pro automatický wrap-around
+ */
+struct NoteQueue {
+    std::array<uint8_t, 256> notes;     // Fixed array pro noty
+    std::atomic<uint8_t> writeIndex{0}; // Thread-safe write index
+    std::atomic<uint8_t> count{0};      // Thread-safe počítadlo
+    uint8_t readIndex{0};               // Read index (protected by mutex)
+    
+    NoteQueue() {
+        notes.fill(0xff);  // Vyplnění invalid hodnotou
+    }
+    
+    // Reset metoda
+    void reset() {
+        writeIndex.store(0);
+        count.store(0);
+        readIndex = 0;
+        notes.fill(0xff);
+    }
+};
+
+/**
+ * MidiStateManager - centrální správa MIDI stavu
+ * OPRAVA: Unified mutex strategy pro thread safety
  */
 class MidiStateManager 
 {
 public:
     MidiStateManager();
+    ~MidiStateManager() = default;
     
-    // Metoda pro přidání note-on události do stavu a fronty.
-    void putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity);
-    
-    // Metoda pro přidání note-off události do stavu a fronty.
-    void putNoteOff(uint8_t channel, uint8_t key);
-    
-    // Metoda pro vytažení note-on klávesy z fronty pro daný channel.
-    uint8_t popNoteOn(uint8_t channel);   // Vrací key nebo 0xff pokud žádný není
-    
-    // Metoda pro vytažení note-off klávesy z fronty pro daný channel.
-    uint8_t popNoteOff(uint8_t channel);  // Vrací key nebo 0xff pokud žádný není
-    
-    // Metoda pro získání velocity aktivní noty pro daný channel a key.
-    uint8_t getVelocity(uint8_t channel, uint8_t key) const;
-    
-    // Metoda pro nastavení hodnoty pitch wheel.
-    void setPitchWheel(int16_t pitchWheelValue);
-    
-    // Metoda pro získání aktuální hodnoty pitch wheel.
-    int16_t getPitchWheel() const { return pitchWheel_; }
-    
-    // Metoda pro nastavení hodnoty MIDI controlleru pro daný channel.
-    void setControllerValue(uint8_t channel, uint8_t controller, uint8_t value);
-    
-    // Metoda pro získání hodnoty MIDI controlleru pro daný channel.
-    uint8_t getControllerValue(uint8_t channel, uint8_t controller) const;
-    
-    // Metoda pro logování aktuálně aktivních not.
-    void logActiveNotes() const;
-    
-    // Metoda pro získání počtu aktivních not.
-    int getActiveNoteCount() const;
-    
-    // Hlavní metoda pro zpracování MIDI bufferu z JUCE.
+    // Hlavní MIDI processing metoda
     void processMidiBuffer(const juce::MidiBuffer& midiBuffer);
     
+    // Note management - OPRAVA: Thread-safe s konzistentním lockingem
+    void putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity);
+    void putNoteOff(uint8_t channel, uint8_t key);
+    
+    // Queue access pro VoiceManager - OPRAVA: Thread-safe
+    uint8_t popNoteOn(uint8_t channel);   // Vrací key nebo 0xff pokud žádný není
+    uint8_t popNoteOff(uint8_t channel);  // Vrací key nebo 0xff pokud žádný není
+    
+    // Note state queries - OPRAVA: Thread-safe
+    uint8_t getVelocity(uint8_t channel, uint8_t key) const;
+    bool isNoteActive(uint8_t channel, uint8_t key) const;
+    
+    // Pitch wheel management
+    void setPitchWheel(int16_t pitchWheelValue);
+    int16_t getPitchWheel() const { return pitchWheel_.load(); }
+    
+    // Controller management - OPRAVA: Thread-safe
+    void setControllerValue(uint8_t channel, uint8_t controller, uint8_t value);
+    uint8_t getControllerValue(uint8_t channel, uint8_t controller) const;
+    
+    // Utility methods
+    void logActiveNotes() const;
+    int getActiveNoteCount() const;
+    void resetAllNotes();  // Emergency reset
+    
+    // Statistics
+    uint32_t getTotalMidiMessages() const { return totalMidiMessages_.load(); }
+
 private:
-    // Metoda pro vyhledání slotu pro konkrétní notu v poli aktivních not.
-    int findNoteSlot(uint8_t channel, uint8_t key) const;
-    
-    // Metoda pro vyhledání volného slotu v poli aktivních not.
-    int findFreeSlot() const;
-    
-    // Konstanta definující maximální počet aktivních not (fixed velikost).
+    // Note storage
     static const int MAX_ACTIVE_NOTES = 128;
-    ActiveNote activeNotes_[MAX_ACTIVE_NOTES];
+    std::array<ActiveNote, MAX_ACTIVE_NOTES> activeNotes_;
     
-    // Hodnota pitch wheel (signed pro rozsah -8192 až +8191).
-    int16_t pitchWheel_;
+    // MIDI state
+    std::atomic<int16_t> pitchWheel_{0};                    // Thread-safe pitch wheel
+    std::array<std::array<uint8_t, 128>, 16> controllerValues_;  // [channel][controller]
     
-    // Dvourozměrné pole pro ukládání hodnot MIDI controllerů (channel x controller).
-    uint8_t controllerValues_[16][128];  // [channel][controller]
+    // Event queues pro každý MIDI channel
+    std::array<NoteQueue, 16> noteOnQueues_;
+    std::array<NoteQueue, 16> noteOffQueues_;
     
-    // Struktura pro circular buffer fronty not (velikost 256 pro uint8 wrap-around).
-    struct NoteQueue {
-        uint8_t notes[256];         // Fixed array pro noty
-        uint8_t readIndex;          // Index pro čtení (uint8 pro automatický wrap-around)
-        uint8_t writeIndex;         // Index pro zápis (uint8 pro automatický wrap-around)
-        uint8_t count;              // Počet položek v bufferu
-        
-        NoteQueue() : readIndex(0), writeIndex(0), count(0) {
-            for (int i = 0; i < 256; i++) notes[i] = 0xff;
-        }
-    };
+    // OPRAVA: Unified thread safety - jeden mutex pro všechny MIDI operace
+    mutable std::mutex midiMutex_;         // Unified mutex pro všechny MIDI operace
     
-    NoteQueue noteOnQueue_[16];   // Fronty pro note-on události (jedna pro každý channel)
-    NoteQueue noteOffQueue_[16];  // Fronty pro note-off události (jedna pro každý channel)
-    
-    // Reference na logger pro protokolování událostí.
+    // Statistics a debugging
+    std::atomic<uint32_t> totalMidiMessages_{0};
     Logger& logger_;
     
-    // Pomocná metoda pro přidání položky do circular bufferu.
+    // Helper methods
+    int findNoteSlot(uint8_t channel, uint8_t key) const;
+    int findFreeSlot() const;
     void pushToQueue(NoteQueue& queue, uint8_t note);
-    
-    // Pomocná metoda pro vytažení položky z circular bufferu.
     uint8_t popFromQueue(NoteQueue& queue);
+    
+    // Validation helpers
+    bool isValidChannel(uint8_t channel) const { return channel < 16; }
+    bool isValidKey(uint8_t key) const { return key < 128; }
+    bool isValidController(uint8_t controller) const { return controller < 128; }
+    
+    // Kopírování zakázáno
+    MidiStateManager(const MidiStateManager&) = delete;
+    MidiStateManager& operator=(const MidiStateManager&) = delete;
 };

@@ -1,99 +1,105 @@
 #include "Logger.h"
 #include "PluginEditor.h"
+#include <sstream>
 
-// Inicializace globálního přepínače logování.
-bool Logger::loggingEnabled = true;
+std::atomic<bool> Logger::loggingEnabled{true};
 
-/**
- * Metoda pro získání instance singletonu.
- */
+Logger::Logger() {}
+
 Logger& Logger::getInstance()
 {
     static Logger instance;
     return instance;
 }
 
-/**
- * Metoda pro thread-safe logování.
- * Vytváří formátovaný log s timestampem a přidává do bufferu.
- * Aktualizuje GUI přes MessageManager.
- */
 void Logger::log(const juce::String& component, const juce::String& severity, const juce::String& message)
 {
-    if (!loggingEnabled) return;
+    if (!loggingEnabled.load(std::memory_order_relaxed))
+        return;
 
-    // Vytvoření timestampu pro log.
-    juce::String timestamp = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S");
+    try {
+        auto now = juce::Time::getCurrentTime();
+        juce::String timestamp = now.formatted("%Y-%m-%d %H:%M:%S");
+        juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
 
-    // Formátování logovacího záznamu.
-    juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
-
-    // Přidání do circular bufferu.
-    pushToLogQueue(logEntry);
-
-    // Thread-safe aktualizace GUI přes MessageManager.
-    auto currentEditor = editor.load();
-    if (currentEditor != nullptr)
-    {
-        juce::MessageManager::callAsync([this, currentEditor]() {
-            // Dvojitá kontrola pro bezpečnost po async volání.
-            if (editor.load() == currentEditor && currentEditor != nullptr)
-            {
-                currentEditor->updateLogDisplay();
-            }
-        });
+        pushToLogQueue(logEntry);
+        scheduleGUIUpdate();
+    } catch (...) {
+        // bezpečný fallback
     }
 }
 
-/**
- * Metoda pro thread-safe nastavení reference na editor.
- */
-void Logger::setEditor(AudioPluginAudioProcessorEditor* ed)
-{
-    editor.store(ed);
-}
-
-/**
- * Pomocná metoda pro přidání logu do circular bufferu.
- * Pokud buffer překročí MAX_LOG_ENTRIES, přepíše nejstarší položku (sliding window).
- */
 void Logger::pushToLogQueue(const juce::String& logEntry)
 {
-    logQueue.logs[logQueue.writeIndex] = logEntry;
-    logQueue.writeIndex++;  // uint8 overflow automaticky wrap-around na 0 po 255
-    if (logQueue.count < 256) {
-        logQueue.count++;
+    std::lock_guard<std::mutex> lock(logMutex_);
+
+    uint8_t writeIndex = logQueue_.writeIndex.load();
+    uint8_t currentCount = logQueue_.count.load();
+
+    logQueue_.logs[writeIndex] = logEntry;
+    logQueue_.writeIndex.store(static_cast<uint8_t>(writeIndex + 1));
+
+    if (currentCount < 256) {
+        logQueue_.count.store(currentCount + 1);
     } else {
-        // Sliding window: Pokud plný, posun readIndex (přepis nejstaršího).
-        logQueue.readIndex++;
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + 1);
     }
-    
-    // Omezení na MAX_LOG_ENTRIES (pokud je menší než 256, ručně ořezat).
-    if (logQueue.count > MAX_LOG_ENTRIES) {
-        logQueue.readIndex = (logQueue.readIndex + (logQueue.count - MAX_LOG_ENTRIES)) % 256;
-        logQueue.count = MAX_LOG_ENTRIES;
+
+    if (logQueue_.count.load() > MAX_LOG_ENTRIES) {
+        uint8_t excess = logQueue_.count.load() - MAX_LOG_ENTRIES;
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + excess);
+        logQueue_.count.store(MAX_LOG_ENTRIES);
     }
 }
 
-/**
- * Pomocná metoda pro získání aktuálních logů jako StringArray.
- * Používá se pro přístup k bufferu z GUI.
- */
+void Logger::setEditor(AudioPluginAudioProcessorEditor* ed)
+{
+    std::lock_guard<std::mutex> lock(editorMutex_);
+    editorPtr_ = ed;
+}
+
+void Logger::scheduleGUIUpdate()
+{
+    juce::MessageManager::callAsync([this]() {
+        std::lock_guard<std::mutex> lock(editorMutex_);
+        if (editorPtr_ != nullptr) {
+            editorPtr_->updateLogDisplay();
+        }
+    });
+}
+
+juce::StringArray Logger::getLogBuffer() const
+{
+    return getCurrentLogs();
+}
+
 juce::StringArray Logger::getCurrentLogs() const
 {
+    std::lock_guard<std::mutex> lock(logMutex_);
+
     juce::StringArray result;
-    uint8_t index = logQueue.readIndex;
-    for (uint8_t i = 0; i < logQueue.count; ++i) {
-        result.add(logQueue.logs[index]);
-        index++;  // uint8 wrap-around automaticky
+    uint8_t currentCount = logQueue_.count.load();
+    uint8_t readIndex = logQueue_.readIndex;
+
+    for (uint8_t i = 0; i < currentCount; ++i) {
+        uint8_t index = static_cast<uint8_t>(readIndex + i);
+        result.add(logQueue_.logs[index]);
     }
     return result;
 }
 
-/**
- * Metoda pro získání aktuálních logů jako StringArray.
- */
-juce::StringArray Logger::getLogBuffer() const
+void Logger::clearLogs()
 {
-    return getCurrentLogs();
+    std::lock_guard<std::mutex> lock(logMutex_);
+    logQueue_.writeIndex.store(0);
+    logQueue_.count.store(0);
+    logQueue_.readIndex = 0;
+    for (auto& log : logQueue_.logs) {
+        log = juce::String();
+    }
+}
+
+size_t Logger::getLogCount() const
+{
+    return logQueue_.count.load(std::memory_order_relaxed);
 }

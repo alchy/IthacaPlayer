@@ -1,68 +1,71 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
-#include <atomic>
+#include <memory>
+#include <array>
 #include "Logger.h"
 
-// Konstanta inspirovaná vaším přístupem k DCO_PER_VOICE_DEFAULT
-#define MAX_SAMPLE_LENGTH_SECONDS 12.0f
-#define MIDI_NOTE_COUNT 128
-#define SAMPLE_NOTE_FOR_PROTOTYPE 60  // Middle C pro prototyp
-
-/**
- * SampleSegment - reprezentuje jeden pre-computed sample pro jednu MIDI notu
- * Inspirováno vaší DeviceDCO strukturou pro jednotlivé generátory
+/*
+ * SampleSegment
+ *   - vlastní jednoduché úložiště pro float vzorek (unique_ptr)
+ *   - lengthSamples = délka v samplech
  */
-struct SampleSegment {
-    float* sampleData;           // Pointer na audio data (podobné vašim DCO buffer pointerům)
-    uint32_t lengthSamples;      // Délka v samples
-    uint8_t midiNote;           // MIDI nota (0-127)
-    bool isAllocated;           // Flag pro alokaci (podobné vašim device type checks)
-    
-    SampleSegment() : sampleData(nullptr), lengthSamples(0), midiNote(0), isAllocated(false) {}
+struct SampleSegment
+{
+    std::unique_ptr<float[]> sampleData;
+    uint32_t lengthSamples{0};
+    uint8_t midiNote{0};
+    bool isAllocated{false};
+
+    void reset()
+    {
+        sampleData.reset();
+        lengthSamples = 0;
+        midiNote = 0;
+        isAllocated = false;
+    }
 };
 
-/**
- * SampleLibrary - centrální správce pre-computed samples
- * Inspirováno vaším Performer pattern - centrální orchestrace zdrojů
+/*
+ * SampleLibrary
+ * - refaktorizovaná, thread-safe (interní mutex pro mutace)
+ * - initialize(sampleRate) připraví (vygeneruje) všechny vzorky v rozsahu MIN_NOTE..MAX_NOTE
+ * - poskytuje read-only přístup: getSampleData/getSampleLength/isNoteAvailable
  */
-class SampleLibrary 
+class SampleLibrary
 {
 public:
-    SampleLibrary(double sampleRate);
-    ~SampleLibrary();
-    
-    // Inicializace podobná vaší scan_bus() metodě
-    void initializeLibrary();
-    
-    // Generování sine wave pro jednu notu (podobné vašemu build_dumb_voices)
-    bool generateSineWaveForNote(uint8_t midiNote, float frequency);
-    
-    // Získání sample dat pro playback (podobné vašemu get/pop pattern)
+    SampleLibrary();
+    ~SampleLibrary() = default;
+
+    // Inicializace knihovny (nutné zavolat před použitím)
+    // Vygeneruje všechny vzorky v rozsahu MIN_NOTE..MAX_NOTE (12 sekund každý)
+    void initialize(double sampleRate);
+
+    // Vyčistí všechny vzorky (uvolní paměť)
+    void clear();
+
+    // Generuje a uloží vzorek pro konkrétní notu (použito interně i externě)
+    // Vrací true pokud generace proběhla úspěšně.
+    bool generateSampleForNote(uint8_t note);
+
+    // Read-only přístup
     const float* getSampleData(uint8_t midiNote) const;
     uint32_t getSampleLength(uint8_t midiNote) const;
     bool isNoteAvailable(uint8_t midiNote) const;
-    
-    // Utility methods
-    double getSampleRate() const { return sampleRate_; }
-    uint32_t getMaxSampleLength() const { return maxSampleLength_; }
-    
+
+    // Konstanty
+    static constexpr uint8_t MIN_NOTE = 21;   // A0
+    static constexpr uint8_t MAX_NOTE = 108;  // C8
+    static constexpr double SAMPLE_SECONDS = 12.0; // délka v sekundách
+
 private:
-    // Vypočet délky bufferu pro danou sample rate
-    void calculateBufferSizes();
-    
-    // Alokace paměti (podobné vašemu memory management přístupu)
-    bool allocateSegment(uint8_t midiNote);
-    void deallocateSegment(uint8_t midiNote);
-    
-    // Generování sine wave dat
-    void fillSineWaveData(float* buffer, uint32_t length, float frequency, double sampleRate);
-    
-    // Member variables podobné vašim global arrays dco[16], chain[64]
-    SampleSegment segments_[MIDI_NOTE_COUNT];
-    double sampleRate_;
-    uint32_t maxSampleLength_;         // Maximální délka v samples pro 12s
-    
-    // Logger instance pro debugging (podobně jako v main kódu)
+    // interní helper pro frekvenci
+    double getFrequencyForNote(uint8_t midiNote) const;
+
+    mutable std::mutex accessMutex_;                // chrání sampleSegments_
+    std::array<SampleSegment, 128> sampleSegments_; // úložiště pro všechny MIDInoty
+    double sampleRate_{44100.0};
     Logger& logger_;
+    static constexpr float SAMPLE_AMPLITUDE = 0.25f; // bezpečná amplitude
 };

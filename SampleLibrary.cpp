@@ -1,176 +1,137 @@
 #include "SampleLibrary.h"
 #include <cmath>
 
-#ifdef _WIN32
-#pragma warning(push)
-#pragma warning(disable: 4244) // Conversion warnings pro MIDI values
-#endif
-
-SampleLibrary::SampleLibrary(double sampleRate)
-    : sampleRate_(sampleRate)
-    , maxSampleLength_(0)
-    , logger_(Logger::getInstance())
+SampleLibrary::SampleLibrary()
+    : logger_(Logger::getInstance())
 {
-    calculateBufferSizes();
-    
-    // Inicializace všech segmentů
-    for (int i = 0; i < MIDI_NOTE_COUNT; i++) {
-        segments_[i] = SampleSegment();
-        segments_[i].midiNote = i;
+    // nic dál v konstruktoru - actual allocation happens in initialize()
+}
+
+/*
+ * initialize
+ *  - uloží sampleRate a vygeneruje všechno (MIN_NOTE..MAX_NOTE)
+ *  - pokud generování nějaké noty selže, loguje a pokračuje (nepřeruší ostatní)
+ *  - OPRAVA: Odebrán lock mutexu, protože inicializace je single-threaded (z prepareToPlay),
+ *    což zabraňuje deadlocku při rekurzivním zamykání v generateSampleForNote.
+ */
+void SampleLibrary::initialize(double sampleRate)
+{
+    if (sampleRate <= 0.0) {
+        logger_.log("SampleLibrary/initialize", "error", "Invalid sampleRate: " + juce::String(sampleRate));
+        throw std::invalid_argument("Invalid sampleRate");
     }
-    
-    logger_.log("SampleLibrary/constructor", "info", "SampleLibrary inicializovana pro sample rate: " + juce::String(sampleRate, 1));
-    logger_.log("SampleLibrary/constructor", "info", "Max sample length: " + juce::String(maxSampleLength_) + " samples");
-}
 
-SampleLibrary::~SampleLibrary()
-{
-    logger_.log("SampleLibrary/destructor", "info", "Uvolnovani Sample Library");
-    
-    // Uvolnění všech alokovaných segmentů
-    for (int i = 0; i < MIDI_NOTE_COUNT; i++) {
-        deallocateSegment(i);
+    sampleRate_ = sampleRate;
+    clear();
+
+    logger_.log("SampleLibrary/initialize", "info",
+                "Inicializace sample library se sampleRate=" + juce::String(sampleRate_));
+
+    int success = 0;
+    int fail = 0;
+    for (uint8_t n = MIN_NOTE; n <= MAX_NOTE; ++n) {
+        if (generateSampleForNote(n)) ++success;
+        else ++fail;
     }
-    
-    logger_.log("SampleLibrary/destructor", "info", "Sample Library uvolnena");
+
+    logger_.log("SampleLibrary/initialize", "info",
+                "Generování samplů dokončeno. Success: " + juce::String(success) +
+                " Fail: " + juce::String(fail));
 }
 
-void SampleLibrary::initializeLibrary()
+
+/*
+ * clear - vymaže interní data
+ */
+void SampleLibrary::clear()
 {
-    logger_.log("SampleLibrary/initializeLibrary", "info", "=== INICIALIZACE SAMPLE LIBRARY ===");
-    logger_.log("SampleLibrary/initializeLibrary", "info", "Priprava pro " + juce::String(MIDI_NOTE_COUNT) + " MIDI not");
-    logger_.log("SampleLibrary/initializeLibrary", "info", "Delka kazdeho sample: " + juce::String(MAX_SAMPLE_LENGTH_SECONDS) + " sekund");
-    
-    // Výpočet celkové paměti
-    double totalMemoryMB = (maxSampleLength_ * MIDI_NOTE_COUNT * sizeof(float)) / (1024.0 * 1024.0);
-    logger_.log("SampleLibrary/initializeLibrary", "info", "Potencialni pamet: " + juce::String(totalMemoryMB, 1) + " MB");
-    
-    logger_.log("SampleLibrary/initializeLibrary", "info", "Sample Library pripravena k pouziti");
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    for (auto& seg : sampleSegments_)
+        seg.reset();
+
+    logger_.log("SampleLibrary/clear", "debug", "SampleLibrary cleared");
 }
 
-bool SampleLibrary::generateSineWaveForNote(uint8_t midiNote, float frequency)
+/*
+ * generateSampleForNote
+ *  - vygeneruje sinusovku délky SAMPLE_SECONDS pro danou notu
+ *  - vrátí true pokud uspěje
+ */
+bool SampleLibrary::generateSampleForNote(uint8_t note)
 {
-    if (midiNote >= MIDI_NOTE_COUNT) {
-        logger_.log("SampleLibrary/generateSineWaveForNote", "warn", "MIDI nota mimo rozsah: " + juce::String(midiNote));
+    // lokální kalkulace bez držení locku po dobu generování (alokačně-intenzivní)
+    double freq = getFrequencyForNote(note);
+    uint32_t sampleLength = static_cast<uint32_t>(sampleRate_ * SAMPLE_SECONDS);
+
+    if (sampleLength < 1) {
+        logger_.log("SampleLibrary/generateSampleForNote", "error",
+                    "Invalid sample length for note " + juce::String((int)note));
         return false;
     }
-    
-    logger_.log("SampleLibrary/generateSineWaveForNote", "info", "Generovani sine wave pro MIDI notu " + juce::String(midiNote) + 
-                " (frekvence: " + juce::String(frequency, 2) + " Hz)");
-    
-    // Alokace paměti pro segment
-    if (!allocateSegment(midiNote)) {
-        logger_.log("SampleLibrary/generateSineWaveForNote", "warn", "Chyba pri alokaci pameti pro notu " + juce::String(midiNote));
+
+    std::unique_ptr<float[]> tmpData;
+    try {
+        tmpData = std::make_unique<float[]>(sampleLength);
+    } catch (const std::bad_alloc&) {
+        logger_.log("SampleLibrary/generateSampleForNote", "error",
+                    "Allocation failed for note " + juce::String((int)note));
         return false;
     }
-    
-    // Generování sine wave dat
-    fillSineWaveData(segments_[midiNote].sampleData, segments_[midiNote].lengthSamples, frequency, sampleRate_);
-    
-    logger_.log("SampleLibrary/generateSineWaveForNote", "info", "Sample pro notu " + juce::String(midiNote) + " uspesne vygenerovan");
-    logger_.log("SampleLibrary/generateSineWaveForNote", "info", "Delka: " + juce::String(segments_[midiNote].lengthSamples) + " samples");
-    
+
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    const double phaseInc = twoPi * freq / sampleRate_;
+
+    for (uint32_t i = 0; i < sampleLength; ++i) {
+        double phase = phaseInc * static_cast<double>(i);
+        // explicit cast -> potlačí warning C4244
+        tmpData[i] = SAMPLE_AMPLITUDE * static_cast<float>(std::sin(phase));
+    }
+
+    // commit: uložení do interní struktury pod lockem (atomic-ish)
+    {
+        std::lock_guard<std::mutex> lock(accessMutex_);
+        SampleSegment& seg = sampleSegments_[note];
+        seg.sampleData = std::move(tmpData);
+        seg.lengthSamples = sampleLength;
+        seg.midiNote = note;
+        seg.isAllocated = true;
+    }
+
+    logger_.log("SampleLibrary/generateSampleForNote", "debug",
+                "Vzorek vygenerován pro notu " + juce::String((int)note) +
+                " freq=" + juce::String(freq, 2) +
+                " samples=" + juce::String(sampleLength));
     return true;
 }
 
+/*
+ * getSampleData / getSampleLength / isNoteAvailable
+ *  - vrací read-only data (chráněné mutexem)
+ */
 const float* SampleLibrary::getSampleData(uint8_t midiNote) const
 {
-    if (midiNote >= MIDI_NOTE_COUNT || !segments_[midiNote].isAllocated) {
-        return nullptr;
-    }
-    
-    return segments_[midiNote].sampleData;
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
+        return sampleSegments_[midiNote].sampleData.get();
+    return nullptr;
 }
 
 uint32_t SampleLibrary::getSampleLength(uint8_t midiNote) const
 {
-    if (midiNote >= MIDI_NOTE_COUNT || !segments_[midiNote].isAllocated) {
-        return 0;
-    }
-    
-    return segments_[midiNote].lengthSamples;
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
+        return sampleSegments_[midiNote].lengthSamples;
+    return 0;
 }
 
 bool SampleLibrary::isNoteAvailable(uint8_t midiNote) const
 {
-    if (midiNote >= MIDI_NOTE_COUNT) {
-        return false;
-    }
-    
-    return segments_[midiNote].isAllocated;
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated;
 }
 
-void SampleLibrary::calculateBufferSizes()
+double SampleLibrary::getFrequencyForNote(uint8_t midiNote) const
 {
-    maxSampleLength_ = static_cast<uint32_t>(MAX_SAMPLE_LENGTH_SECONDS * sampleRate_);
-    
-    logger_.log("SampleLibrary/calculateBufferSizes", "info", "Vypocitana max delka bufferu: " + juce::String(maxSampleLength_) + " samples");
+    // standardní formule A4=440Hz (MIDI 69)
+    return 440.0 * std::pow(2.0, (static_cast<int>(midiNote) - 69) / 12.0);
 }
-
-bool SampleLibrary::allocateSegment(uint8_t midiNote)
-{
-    if (midiNote >= MIDI_NOTE_COUNT) {
-        return false;
-    }
-    
-    // Pokud už je alokován, nejdříve uvolni
-    if (segments_[midiNote].isAllocated) {
-        deallocateSegment(midiNote);
-    }
-    
-    try {
-        segments_[midiNote].sampleData = new float[maxSampleLength_];
-        segments_[midiNote].lengthSamples = maxSampleLength_;
-        segments_[midiNote].isAllocated = true;
-        
-        // Vyčištění bufferu
-        for (uint32_t i = 0; i < maxSampleLength_; i++) {
-            segments_[midiNote].sampleData[i] = 0.0f;
-        }
-        
-        logger_.log("SampleLibrary/allocateSegment", "debug", "Segment pro notu " + juce::String(midiNote) + " alokovan");
-        return true;
-    }
-    catch (const std::bad_alloc& e) {
-        logger_.log("SampleLibrary/allocateSegment", "warn", "Chyba alokace pameti pro notu " + juce::String(midiNote));
-        return false;
-    }
-}
-
-void SampleLibrary::deallocateSegment(uint8_t midiNote)
-{
-    if (midiNote >= MIDI_NOTE_COUNT) {
-        return;
-    }
-    
-    if (segments_[midiNote].isAllocated && segments_[midiNote].sampleData != nullptr) {
-        delete[] segments_[midiNote].sampleData;
-        segments_[midiNote].sampleData = nullptr;
-        segments_[midiNote].lengthSamples = 0;
-        segments_[midiNote].isAllocated = false;
-        
-        logger_.log("SampleLibrary/deallocateSegment", "debug", "Segment pro notu " + juce::String(midiNote) + " uvolnen");
-    }
-}
-
-void SampleLibrary::fillSineWaveData(float* buffer, uint32_t length, float frequency, double sampleRate)
-{
-    if (buffer == nullptr || length == 0) {
-        return;
-    }
-    
-    const float twoPi = 2.0f * 3.14159265359f;
-    const float increment = twoPi * frequency / static_cast<float>(sampleRate);
-    
-    for (uint32_t i = 0; i < length; i++) {
-        float phase = increment * static_cast<float>(i);
-        buffer[i] = 0.3f * std::sin(phase); // 0.3f amplitude aby nebyl příliš hlasitý
-    }
-    
-    logger_.log("SampleLibrary/fillSineWaveData", "debug", "Sine wave data vygenerovana: " + 
-                juce::String(length) + " samples, frekvence " + juce::String(frequency, 2) + " Hz");
-}
-
-#ifdef _WIN32
-#pragma warning(pop)
-#endif

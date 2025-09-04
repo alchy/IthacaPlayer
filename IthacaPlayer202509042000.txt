@@ -1,0 +1,2261 @@
+===== File: CMakeLists.txt =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\CMakeLists.txt
+=====
+cmake_minimum_required(VERSION 3.22)
+
+project(ITHACA_PLAYER VERSION 0.0.1)
+
+add_subdirectory(JUCE)
+
+juce_add_plugin(IthacaPlayer
+    COMPANY_NAME "Lord Audio"
+    IS_SYNTH TRUE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    PLUGIN_MANUFACTURER_CODE Lau0
+    PLUGIN_CODE Itca
+    FORMATS AU VST3 Standalone
+    PRODUCT_NAME "IthacaPlayer")
+
+juce_generate_juce_header(IthacaPlayer)
+
+target_sources(IthacaPlayer
+    PRIVATE
+        Logger.h
+        Logger.cpp
+        SampleLibrary.h
+        SampleLibrary.cpp
+        MidiStateManager.h
+        MidiStateManager.cpp
+        VoiceManager.h
+        VoiceManager.cpp
+        PluginEditor.h
+        PluginEditor.cpp
+        PluginProcessor.h
+        PluginProcessor.cpp)
+
+target_compile_definitions(IthacaPlayer
+    PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0)
+
+target_link_libraries(IthacaPlayer
+    PRIVATE
+        juce::juce_audio_utils
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags)
+
+
+===== File: JUCE-BUILD.md =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\JUCE-BUILD.md
+=====
+# https://cmake.org/download/
+# https://trirpi.github.io/posts/developing-audio-plugins-with-juce-and-visual-studio-code/
+
+
+# pridani JUCE
+- git submodule add https://github.com/juce-framework/JUCE.git JUCE
+
+cd JUCE
+cmake -B build
+cmake -B build -DJUCE_BUILD_EXTRAS=ON
+cmake --build build --target AudioPluginHost
+
+# Visual Studio Code
+
+Build the Project 
+- Terminal > Run Build Task (or press Ctrl+Shift+B)
+
+Run Without Debugging 
+- 
+
+
+===== File: Logger.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\Logger.cpp
+=====
+#include "Logger.h"
+#include "PluginEditor.h"
+#include <sstream>
+
+std::atomic<bool> Logger::loggingEnabled{true};
+
+Logger::Logger() {}
+
+Logger& Logger::getInstance()
+{
+    static Logger instance;
+    return instance;
+}
+
+void Logger::log(const juce::String& component, const juce::String& severity, const juce::String& message)
+{
+    if (!loggingEnabled.load(std::memory_order_relaxed))
+        return;
+
+    try {
+        auto now = juce::Time::getCurrentTime();
+        juce::String timestamp = now.formatted("%Y-%m-%d %H:%M:%S");
+        juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
+
+        pushToLogQueue(logEntry);
+        scheduleGUIUpdate();
+    } catch (...) {
+        // bezpečný fallback
+    }
+}
+
+void Logger::pushToLogQueue(const juce::String& logEntry)
+{
+    std::lock_guard<std::mutex> lock(logMutex_);
+
+    uint8_t writeIndex = logQueue_.writeIndex.load();
+    uint8_t currentCount = logQueue_.count.load();
+
+    logQueue_.logs[writeIndex] = logEntry;
+    logQueue_.writeIndex.store(static_cast<uint8_t>(writeIndex + 1));
+
+    if (currentCount < 256) {
+        logQueue_.count.store(currentCount + 1);
+    } else {
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + 1);
+    }
+
+    if (logQueue_.count.load() > MAX_LOG_ENTRIES) {
+        uint8_t excess = logQueue_.count.load() - MAX_LOG_ENTRIES;
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + excess);
+        logQueue_.count.store(MAX_LOG_ENTRIES);
+    }
+}
+
+void Logger::setEditor(AudioPluginAudioProcessorEditor* ed)
+{
+    std::lock_guard<std::mutex> lock(editorMutex_);
+    editorPtr_ = ed;
+}
+
+void Logger::scheduleGUIUpdate()
+{
+    juce::MessageManager::callAsync([this]() {
+        std::lock_guard<std::mutex> lock(editorMutex_);
+        if (editorPtr_ != nullptr) {
+            editorPtr_->updateLogDisplay();
+        }
+    });
+}
+
+juce::StringArray Logger::getLogBuffer() const
+{
+    return getCurrentLogs();
+}
+
+juce::StringArray Logger::getCurrentLogs() const
+{
+    std::lock_guard<std::mutex> lock(logMutex_);
+
+    juce::StringArray result;
+    uint8_t currentCount = logQueue_.count.load();
+    uint8_t readIndex = logQueue_.readIndex;
+
+    for (uint8_t i = 0; i < currentCount; ++i) {
+        uint8_t index = static_cast<uint8_t>(readIndex + i);
+        result.add(logQueue_.logs[index]);
+    }
+    return result;
+}
+
+void Logger::clearLogs()
+{
+    std::lock_guard<std::mutex> lock(logMutex_);
+    logQueue_.writeIndex.store(0);
+    logQueue_.count.store(0);
+    logQueue_.readIndex = 0;
+    for (auto& log : logQueue_.logs) {
+        log = juce::String();
+    }
+}
+
+size_t Logger::getLogCount() const
+{
+    return logQueue_.count.load(std::memory_order_relaxed);
+}
+
+
+===== File: Logger.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\Logger.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_events/juce_events.h>
+#include <atomic>
+#include <mutex>
+#include <array>
+
+#define MAX_LOG_ENTRIES 100
+
+class AudioPluginAudioProcessorEditor;
+
+class Logger
+{
+public:
+    static Logger& getInstance();
+
+    void log(const juce::String& component, const juce::String& severity, const juce::String& message);
+    static std::atomic<bool> loggingEnabled;
+
+    void setEditor(AudioPluginAudioProcessorEditor* ed);
+
+    juce::StringArray getLogBuffer() const;
+    void clearLogs();
+    size_t getLogCount() const;
+
+private:
+    Logger();
+    ~Logger() = default;
+
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    struct LogQueue {
+        std::array<juce::String, 256> logs;
+        std::atomic<uint8_t> writeIndex{0};
+        std::atomic<uint8_t> count{0};
+        uint8_t readIndex{0};
+    };
+
+    LogQueue logQueue_;
+
+    mutable std::mutex logMutex_;
+    mutable std::mutex editorMutex_;
+
+    // 🔧 oprava: už jen raw pointer (JUCE spravuje lifecycle editoru)
+    AudioPluginAudioProcessorEditor* editorPtr_{nullptr};
+
+    void pushToLogQueue(const juce::String& logEntry);
+    juce::StringArray getCurrentLogs() const;
+    void scheduleGUIUpdate();
+};
+
+
+===== File: MidiStateManager.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\MidiStateManager.cpp
+=====
+#include "MidiStateManager.h"
+#include <algorithm>
+#include <cassert>
+
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4244) // Conversion warnings pro MIDI values
+#endif
+
+//==============================================================================
+MidiStateManager::MidiStateManager()
+    : logger_(Logger::getInstance())
+{
+    logger_.log("MidiStateManager/constructor", "info", "=== INICIALIZACE MIDI STATE MANAGER ===");
+    
+    // Inicializace aktivních not
+    for (auto& note : activeNotes_) {
+        note.reset();
+    }
+    
+    // Inicializace MIDI controller hodnot podle standardu
+    for (int channel = 0; channel < 16; channel++) {
+        for (int controller = 0; controller < 128; controller++) {
+            controllerValues_[channel][controller] = 0;
+        }
+        
+        // Výchozí hodnoty pro standardní controllery
+        controllerValues_[channel][7] = 100;   // Volume (0-127, default high)
+        controllerValues_[channel][10] = 64;   // Pan (0-127, default center)
+        controllerValues_[channel][11] = 127;  // Expression (0-127, default max)
+        controllerValues_[channel][64] = 0;    // Sustain pedal (0-127, default off)
+        controllerValues_[channel][91] = 0;    // Reverb (0-127, default off)
+        controllerValues_[channel][93] = 0;    // Chorus (0-127, default off)
+    }
+    
+    // Reset všech queue
+    for (auto& queue : noteOnQueues_) {
+        queue.reset();
+    }
+    for (auto& queue : noteOffQueues_) {
+        queue.reset();
+    }
+    
+    logger_.log("MidiStateManager/constructor", "info", 
+                "Max aktivnich not: " + juce::String(MAX_ACTIVE_NOTES));
+    logger_.log("MidiStateManager/constructor", "info", 
+                "MIDI channels: 16, Controllers: 128 per channel");
+    logger_.log("MidiStateManager/constructor", "info", 
+                "=== MIDI STATE MANAGER INICIALIZOVAN ===");
+}
+
+//==============================================================================
+void MidiStateManager::processMidiBuffer(const juce::MidiBuffer& midiBuffer)
+{
+    // Počítadlo pro optimalizaci logování
+    static uint32_t processedMessages = 0;
+    int messagesInBuffer = 0;
+    
+    for (const auto& midiMetadata : midiBuffer) {
+        auto message = midiMetadata.getMessage();
+        processedMessages++;
+        messagesInBuffer++;
+        totalMidiMessages_.fetch_add(1, std::memory_order_relaxed);
+        
+        // Zpracování různých typů MIDI zpráv
+        if (message.isNoteOn()) {
+            // MIDI Note On s velocity 0 se považuje za Note Off podle standardu
+            if (message.getVelocity() == 0) {
+                putNoteOff(message.getChannel() - 1, message.getNoteNumber());
+            } else {
+                putNoteOn(message.getChannel() - 1, message.getNoteNumber(), message.getVelocity());
+            }
+        }
+        else if (message.isNoteOff()) {
+            putNoteOff(message.getChannel() - 1, message.getNoteNumber());
+        }
+        else if (message.isPitchWheel()) {
+            // Převod z JUCE rozsahu (0-16383) na signed int16 (-8192 až +8191)
+            int pitchWheelValue = message.getPitchWheelValue() - 8192;
+            setPitchWheel(static_cast<int16_t>(pitchWheelValue));
+        }
+        else if (message.isController()) {
+            setControllerValue(message.getChannel() - 1, 
+                             message.getControllerNumber(), 
+                             message.getControllerValue());
+        }
+        else if (message.isProgramChange()) {
+            logger_.log("MidiStateManager/processMidiBuffer", "info",
+                       "Program Change: " + juce::String(message.getProgramChangeNumber()) + 
+                       " na kanalu " + juce::String(message.getChannel()));
+        }
+        else if (message.isChannelPressure()) {
+            logger_.log("MidiStateManager/processMidiBuffer", "debug",
+                       "Channel Pressure: " + juce::String(message.getChannelPressureValue()) + 
+                       " na kanalu " + juce::String(message.getChannel()));
+        }
+        else if (message.isAftertouch()) {
+            logger_.log("MidiStateManager/processMidiBuffer", "debug",
+                       "Aftertouch: nota " + juce::String(message.getNoteNumber()) + 
+                       " pressure " + juce::String(message.getAfterTouchValue()) + 
+                       " na kanalu " + juce::String(message.getChannel()));
+        }
+        
+        // Detailní logování pouze pro první zprávy nebo při debug režimu
+        if (processedMessages <= 10) {
+            juce::String midiInfo = "MIDI #" + juce::String(processedMessages) + 
+                                   " @ sample " + juce::String(midiMetadata.samplePosition);
+            
+            if (message.isNoteOn() && message.getVelocity() > 0) {
+                midiInfo += ": NOTE ON - " + 
+                           message.getMidiNoteName(message.getNoteNumber(), true, true, 4) + 
+                           " vel:" + juce::String(message.getVelocity()) + 
+                           " ch:" + juce::String(message.getChannel());
+            } else if (message.isNoteOff() || (message.isNoteOn() && message.getVelocity() == 0)) {
+                midiInfo += ": NOTE OFF - " + 
+                           message.getMidiNoteName(message.getNoteNumber(), true, true, 4) + 
+                           " ch:" + juce::String(message.getChannel());
+            } else if (message.isPitchWheel()) {
+                midiInfo += ": PITCH WHEEL - " + juce::String(message.getPitchWheelValue()) + 
+                           " ch:" + juce::String(message.getChannel());
+            } else if (message.isController()) {
+                midiInfo += ": CC" + juce::String(message.getControllerNumber()) + 
+                           " = " + juce::String(message.getControllerValue()) + 
+                           " ch:" + juce::String(message.getChannel());
+            } else {
+                midiInfo += ": " + message.getDescription();
+            }
+            
+            logger_.log("MidiStateManager/processMidiBuffer", "info", midiInfo);
+        }
+    }
+    
+    // Logování souhrnu pro buffer s více zprávami
+    if (messagesInBuffer > 1) {
+        logger_.log("MidiStateManager/processMidiBuffer", "info",
+                   "Buffer zpracovan: " + juce::String(messagesInBuffer) + 
+                   " zprav (celkem: " + juce::String(totalMidiMessages_.load()) + ")");
+    }
+}
+
+//==============================================================================
+void MidiStateManager::putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity)
+{
+    if (!isValidChannel(channel) || !isValidKey(key)) {
+        logger_.log("MidiStateManager/putNoteOn", "warn", 
+                   "Neplatny channel nebo key: ch=" + juce::String(channel) + 
+                   " key=" + juce::String(key));
+        return;
+    }
+    
+    logger_.log("MidiStateManager/putNoteOn", "info", 
+               "Note ON - Ch:" + juce::String(channel) + 
+               " Key:" + juce::String(key) + 
+               " Vel:" + juce::String(velocity));
+    
+    // OPRAVA: Unified locking strategy
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    // Hledání existujícího slotu nebo volného slotu
+    int slot = findNoteSlot(channel, key);
+    if (slot == -1) {
+        slot = findFreeSlot();
+    }
+    
+    if (slot != -1) {
+        activeNotes_[slot].channel = channel;
+        activeNotes_[slot].key = key;
+        activeNotes_[slot].velocity = velocity;
+        activeNotes_[slot].isActive = true;
+        activeNotes_[slot].triggerTime = juce::Time::getMillisecondCounter();
+        
+        // Přidání do queue pro VoiceManager
+        pushToQueue(noteOnQueues_[channel], key);
+    } else {
+        logger_.log("MidiStateManager/putNoteOn", "warn", 
+                   "Zadny volny slot pro notu - zvyste MAX_ACTIVE_NOTES");
+    }
+}
+
+void MidiStateManager::putNoteOff(uint8_t channel, uint8_t key)
+{
+    if (!isValidChannel(channel) || !isValidKey(key)) {
+        logger_.log("MidiStateManager/putNoteOff", "warn", 
+                   "Neplatny channel nebo key: ch=" + juce::String(channel) + 
+                   " key=" + juce::String(key));
+        return;
+    }
+    
+    logger_.log("MidiStateManager/putNoteOff", "info", 
+               "Note OFF - Ch:" + juce::String(channel) + 
+               " Key:" + juce::String(key));
+    
+    // OPRAVA: Unified locking strategy
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    // Hledání a deaktivace noty
+    int slot = findNoteSlot(channel, key);
+    if (slot != -1) {
+        activeNotes_[slot].isActive = false;
+        
+        // Přidání do note-off queue
+        pushToQueue(noteOffQueues_[channel], key);
+    } else {
+        logger_.log("MidiStateManager/putNoteOff", "debug", 
+                   "Note OFF pro neaktivni notu: ch=" + juce::String(channel) + 
+                   " key=" + juce::String(key));
+        
+        // I neaktivní nota může potřebovat note-off (pro voice cleanup)
+        pushToQueue(noteOffQueues_[channel], key);
+    }
+}
+
+//==============================================================================
+uint8_t MidiStateManager::popNoteOn(uint8_t channel)
+{
+    if (!isValidChannel(channel)) {
+        return 0xff;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    return popFromQueue(noteOnQueues_[channel]);
+}
+
+uint8_t MidiStateManager::popNoteOff(uint8_t channel)
+{
+    if (!isValidChannel(channel)) {
+        return 0xff;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    return popFromQueue(noteOffQueues_[channel]);
+}
+
+//==============================================================================
+uint8_t MidiStateManager::getVelocity(uint8_t channel, uint8_t key) const
+{
+    if (!isValidChannel(channel) || !isValidKey(key)) {
+        return 0;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    int slot = findNoteSlot(channel, key);
+    if (slot != -1 && activeNotes_[slot].isActive) {
+        return activeNotes_[slot].velocity;
+    }
+    
+    return 0; // Výchozí velocity pro neaktivní notu
+}
+
+bool MidiStateManager::isNoteActive(uint8_t channel, uint8_t key) const
+{
+    if (!isValidChannel(channel) || !isValidKey(key)) {
+        return false;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    int slot = findNoteSlot(channel, key);
+    return (slot != -1 && activeNotes_[slot].isActive);
+}
+
+//==============================================================================
+void MidiStateManager::setPitchWheel(int16_t pitchWheelValue)
+{
+    pitchWheel_.store(pitchWheelValue, std::memory_order_relaxed);
+    
+    logger_.log("MidiStateManager/setPitchWheel", "debug", 
+               "Pitch wheel: " + juce::String(pitchWheelValue));
+}
+
+//==============================================================================
+void MidiStateManager::setControllerValue(uint8_t channel, uint8_t controller, uint8_t value)
+{
+    if (!isValidChannel(channel) || !isValidController(controller)) {
+        logger_.log("MidiStateManager/setControllerValue", "warn", 
+                   "Neplatny channel nebo controller: ch=" + juce::String(channel) + 
+                   " cc=" + juce::String(controller));
+        return;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    controllerValues_[channel][controller] = value;
+    
+    // Logování pouze pro důležité controllery
+    if (controller == 1 || controller == 7 || controller == 10 || controller == 64 || 
+        controller == 91 || controller == 93) {
+        
+        juce::String ccName = "CC" + juce::String(controller);
+        switch (controller) {
+            case 1: ccName = "Modulation"; break;
+            case 7: ccName = "Volume"; break;
+            case 10: ccName = "Pan"; break;
+            case 64: ccName = "Sustain"; break;
+            case 91: ccName = "Reverb"; break;
+            case 93: ccName = "Chorus"; break;
+        }
+        
+        logger_.log("MidiStateManager/setControllerValue", "info", 
+                   ccName + " Ch:" + juce::String(channel) + 
+                   " Val:" + juce::String(value));
+    }
+}
+
+uint8_t MidiStateManager::getControllerValue(uint8_t channel, uint8_t controller) const
+{
+    if (!isValidChannel(channel) || !isValidController(controller)) {
+        return 0;
+    }
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    return controllerValues_[channel][controller];
+}
+
+//==============================================================================
+void MidiStateManager::logActiveNotes() const
+{
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    int activeCount = 0;
+    juce::String noteList;
+    
+    for (const auto& note : activeNotes_) {
+        if (note.isActive) {
+            activeCount++;
+            if (noteList.isNotEmpty()) noteList += ", ";
+            noteList += juce::String(note.key) + "(ch" + juce::String(note.channel) + ")";
+        }
+    }
+    
+    logger_.log("MidiStateManager/logActiveNotes", "debug", 
+               "Aktivnich not: " + juce::String(activeCount) + " [" + noteList + "]");
+}
+
+int MidiStateManager::getActiveNoteCount() const
+{
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    int count = 0;
+    for (const auto& note : activeNotes_) {
+        if (note.isActive) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void MidiStateManager::resetAllNotes()
+{
+    logger_.log("MidiStateManager/resetAllNotes", "info", "=== RESET VSECH NOT ===");
+    
+    // OPRAVA: Unified locking
+    std::lock_guard<std::mutex> lock(midiMutex_);
+    
+    // Reset všech aktivních not
+    for (auto& note : activeNotes_) {
+        note.reset();
+    }
+    
+    // Reset všech queue
+    for (auto& queue : noteOnQueues_) {
+        queue.reset();
+    }
+    for (auto& queue : noteOffQueues_) {
+        queue.reset();
+    }
+    
+    // Reset pitch wheel
+    pitchWheel_.store(0);
+    
+    logger_.log("MidiStateManager/resetAllNotes", "info", "Vse resetovano");
+}
+
+//==============================================================================
+// Private helper methods
+//==============================================================================
+
+int MidiStateManager::findNoteSlot(uint8_t channel, uint8_t key) const
+{
+    // Metoda se volá již v rámci mutex lock
+    for (int i = 0; i < MAX_ACTIVE_NOTES; i++) {
+        if (activeNotes_[i].channel == channel && activeNotes_[i].key == key) {
+            return i;
+        }
+    }
+    return -1; // Slot nenalezen
+}
+
+int MidiStateManager::findFreeSlot() const
+{
+    // Metoda se volá již v rámci mutex lock
+    for (int i = 0; i < MAX_ACTIVE_NOTES; i++) {
+        if (!activeNotes_[i].isActive) {
+            return i;
+        }
+    }
+    return -1; // Žádný volný slot
+}
+
+void MidiStateManager::pushToQueue(NoteQueue& queue, uint8_t note)
+{
+    // OPRAVA: Už jsme v unified mutex lock, nepotřebujeme další lock
+    uint8_t currentCount = queue.count.load();
+    if (currentCount < 255) {  // Ponecháme místo pro wrap-around detection
+        uint8_t writeIndex = queue.writeIndex.load();
+        queue.notes[writeIndex] = note;
+        queue.writeIndex.store(static_cast<uint8_t>(writeIndex + 1));  // uint8 auto wrap
+        queue.count.store(currentCount + 1);
+    } else {
+        // Queue overflow - starší zprávy se ztratí (sliding window)
+        logger_.log("MidiStateManager/pushToQueue", "warn", 
+                   "Queue overflow - zprava ztracena");
+    }
+}
+
+uint8_t MidiStateManager::popFromQueue(NoteQueue& queue)
+{
+    // OPRAVA: Už jsme v unified mutex lock, nepotřebujeme další lock
+    uint8_t currentCount = queue.count.load();
+    if (currentCount > 0) {
+        uint8_t note = queue.notes[queue.readIndex];
+        queue.readIndex = static_cast<uint8_t>(queue.readIndex + 1);  // uint8 auto wrap
+        queue.count.store(currentCount - 1);
+        return note;
+    }
+    
+    return 0xff; // Fronta je prázdná
+}
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
+
+
+===== File: MidiStateManager.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\MidiStateManager.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
+#include <atomic>
+#include "Logger.h"
+
+/**
+ * ActiveNote - struktura reprezentující aktivní MIDI notu
+ * Optimalizovaná pro rychlý přístup a cache efficiency
+ */
+struct ActiveNote {
+    uint8_t key;                // MIDI nota (0-127)
+    uint8_t velocity;           // Velocity (0-127)
+    uint8_t channel;            // MIDI channel (0-15)
+    bool isActive;              // Flag indikující aktivní stav noty
+    uint32_t triggerTime;       // Timestamp spuštění noty (pro voice stealing)
+    
+    // Konstruktor s výchozími hodnotami
+    ActiveNote() : key(0), velocity(0), channel(0), isActive(false), triggerTime(0) {}
+    
+    // Reset metoda pro opětovné použití
+    void reset() {
+        key = 0;
+        velocity = 0;
+        channel = 0;
+        isActive = false;
+        triggerTime = 0;
+    }
+};
+
+/**
+ * NoteQueue - optimalizovaný circular buffer pro MIDI noty
+ * Používá uint8 pro automatický wrap-around
+ */
+struct NoteQueue {
+    std::array<uint8_t, 256> notes;     // Fixed array pro noty
+    std::atomic<uint8_t> writeIndex{0}; // Thread-safe write index
+    std::atomic<uint8_t> count{0};      // Thread-safe počítadlo
+    uint8_t readIndex{0};               // Read index (protected by mutex)
+    
+    NoteQueue() {
+        notes.fill(0xff);  // Vyplnění invalid hodnotou
+    }
+    
+    // Reset metoda
+    void reset() {
+        writeIndex.store(0);
+        count.store(0);
+        readIndex = 0;
+        notes.fill(0xff);
+    }
+};
+
+/**
+ * MidiStateManager - centrální správa MIDI stavu
+ * OPRAVA: Unified mutex strategy pro thread safety
+ */
+class MidiStateManager 
+{
+public:
+    MidiStateManager();
+    ~MidiStateManager() = default;
+    
+    // Hlavní MIDI processing metoda
+    void processMidiBuffer(const juce::MidiBuffer& midiBuffer);
+    
+    // Note management - OPRAVA: Thread-safe s konzistentním lockingem
+    void putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity);
+    void putNoteOff(uint8_t channel, uint8_t key);
+    
+    // Queue access pro VoiceManager - OPRAVA: Thread-safe
+    uint8_t popNoteOn(uint8_t channel);   // Vrací key nebo 0xff pokud žádný není
+    uint8_t popNoteOff(uint8_t channel);  // Vrací key nebo 0xff pokud žádný není
+    
+    // Note state queries - OPRAVA: Thread-safe
+    uint8_t getVelocity(uint8_t channel, uint8_t key) const;
+    bool isNoteActive(uint8_t channel, uint8_t key) const;
+    
+    // Pitch wheel management
+    void setPitchWheel(int16_t pitchWheelValue);
+    int16_t getPitchWheel() const { return pitchWheel_.load(); }
+    
+    // Controller management - OPRAVA: Thread-safe
+    void setControllerValue(uint8_t channel, uint8_t controller, uint8_t value);
+    uint8_t getControllerValue(uint8_t channel, uint8_t controller) const;
+    
+    // Utility methods
+    void logActiveNotes() const;
+    int getActiveNoteCount() const;
+    void resetAllNotes();  // Emergency reset
+    
+    // Statistics
+    uint32_t getTotalMidiMessages() const { return totalMidiMessages_.load(); }
+
+private:
+    // Note storage
+    static const int MAX_ACTIVE_NOTES = 128;
+    std::array<ActiveNote, MAX_ACTIVE_NOTES> activeNotes_;
+    
+    // MIDI state
+    std::atomic<int16_t> pitchWheel_{0};                    // Thread-safe pitch wheel
+    std::array<std::array<uint8_t, 128>, 16> controllerValues_;  // [channel][controller]
+    
+    // Event queues pro každý MIDI channel
+    std::array<NoteQueue, 16> noteOnQueues_;
+    std::array<NoteQueue, 16> noteOffQueues_;
+    
+    // OPRAVA: Unified thread safety - jeden mutex pro všechny MIDI operace
+    mutable std::mutex midiMutex_;         // Unified mutex pro všechny MIDI operace
+    
+    // Statistics a debugging
+    std::atomic<uint32_t> totalMidiMessages_{0};
+    Logger& logger_;
+    
+    // Helper methods
+    int findNoteSlot(uint8_t channel, uint8_t key) const;
+    int findFreeSlot() const;
+    void pushToQueue(NoteQueue& queue, uint8_t note);
+    uint8_t popFromQueue(NoteQueue& queue);
+    
+    // Validation helpers
+    bool isValidChannel(uint8_t channel) const { return channel < 16; }
+    bool isValidKey(uint8_t key) const { return key < 128; }
+    bool isValidController(uint8_t controller) const { return controller < 128; }
+    
+    // Kopírování zakázáno
+    MidiStateManager(const MidiStateManager&) = delete;
+    MidiStateManager& operator=(const MidiStateManager&) = delete;
+};
+
+
+===== File: PluginEditor.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\PluginEditor.cpp
+=====
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+#include "Logger.h"
+
+//==============================================================================
+AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
+    : AudioProcessorEditor (&p), processorRef (p)
+{
+    juce::ignoreUnused (processorRef);
+    
+    // Logování vytváření editoru
+    Logger::getInstance().log("PluginEditor/constructor", "info", "=== INICIALIZACE GUI ===");
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Vytvářeni komponenty editoru");
+    
+    // Inicializace log display (multiline, read-only, se scrollbar)
+    logDisplay = std::make_unique<juce::TextEditor>();
+    logDisplay->setMultiLine(true);
+    logDisplay->setReadOnly(true);
+    logDisplay->setScrollbarsShown(true);
+    
+    // Oprava deprecated Font konstruktoru
+    juce::Font monoFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::plain));
+    logDisplay->setFont(monoFont);
+    
+    // Styling pro lepší čitelnost
+    logDisplay->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff1e1e1e)); // Tmavě šedé pozadí
+    logDisplay->setColour(juce::TextEditor::textColourId, juce::Colour(0xff00ff00));        // Zelený text (matrix style)
+    logDisplay->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff404040));     // Tmavý okraj
+    
+    addAndMakeVisible(logDisplay.get());
+    
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Log display inicializovan s matrix theme");
+
+    // Inicializace toggle tlačítka
+    toggleLogging = std::make_unique<juce::ToggleButton>("Zapnout/Vypnout logovani");
+    toggleLogging->setToggleState(Logger::loggingEnabled, juce::dontSendNotification);
+    toggleLogging->onClick = [this] {
+        bool newState = toggleLogging->getToggleState();
+        Logger::loggingEnabled = newState;
+        Logger::getInstance().log("PluginEditor/toggleButton", "info", 
+            "Logovani " + juce::String(newState ? "ZAPNUTO" : "VYPNUTO"));
+        if (!Logger::loggingEnabled) {
+            logDisplay->clear();  // Vyčištění display při vypnutí
+        }
+    };
+    addAndMakeVisible(toggleLogging.get());
+    
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Toggle button inicializovan");
+
+    // Přidání tlačítka pro vyčištění logů
+    clearLogsButton = std::make_unique<juce::TextButton>("Vycistit logy");
+    clearLogsButton->onClick = [this] {
+        logDisplay->clear();
+        Logger::getInstance().log("PluginEditor/clearButton", "info", "=== LOGY VYCISTENY UZIVATELEM ===");
+    };
+    addAndMakeVisible(clearLogsButton.get());
+    
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Clear button inicializovan");
+
+    // Nastavení reference na tento editor v Loggeru
+    Logger::getInstance().setEditor(this);
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Reference na editor nastavena v Loggeru");
+
+    // Rozšířená velikost okna na 800x500
+    setSize (1024, 600);
+    Logger::getInstance().log("PluginEditor/constructor", "info", "Velikost okna nastavena: 800x500");
+    Logger::getInstance().log("PluginEditor/constructor", "info", "=== GUI INICIALIZACE DOKONČENA ===");
+}
+
+AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
+{
+    // Logování před destrukcí
+    Logger::getInstance().log("PluginEditor/destructor", "info", "=== UZAVIRANI GUI ===");
+    Logger::getInstance().log("PluginEditor/destructor", "info", "Zahajeni destrukce editoru");
+    
+    // Odstranění reference při destrukci
+    Logger::getInstance().setEditor(nullptr);
+    Logger::getInstance().log("PluginEditor/destructor", "info", "Reference na editor odstranena");
+    Logger::getInstance().log("PluginEditor/destructor", "info", "=== GUI UZAVRENO ===");
+}
+
+//==============================================================================
+void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
+{
+    // Logování pouze při prvním vykreslení
+    static bool firstPaint = true;
+    if (firstPaint)
+    {
+        Logger::getInstance().log("PluginEditor/paint", "info", "=== PRVNI VYKRESLENI GUI ===");
+        Logger::getInstance().log("PluginEditor/paint", "info", "Rozmery canvas: " + 
+            juce::String(getWidth()) + "x" + juce::String(getHeight()));
+        firstPaint = false;
+    }
+    
+    // Gradient pozadí
+    juce::ColourGradient gradient(juce::Colour(0xff2a2a2a), 0, 0,
+                                  juce::Colour(0xff1a1a1a), 0, (float)getHeight(), false);
+    g.setGradientFill(gradient);
+    g.fillAll();
+
+    // Horní sekce - nadpis a info
+    g.setColour (juce::Colours::lightblue);
+    g.setFont(juce::FontOptions(20.0f, juce::Font::bold));
+    g.drawFittedText("IthacaPlayer Debug Interface", 10, 10, getWidth() - 20, 40, juce::Justification::centred, 1);
+    
+    g.setColour(juce::Colours::lightgrey);
+    g.setFont(juce::FontOptions(12.0f));
+    g.drawFittedText("Real-time logging a debugging audio pluginu", 10, 50, getWidth() - 20, 20, juce::Justification::centred, 1);
+    
+    // Oddělovací čára
+    g.setColour(juce::Colour(0xff404040));
+    g.fillRect(10, 80, getWidth() - 20, 1);
+}
+
+void AudioPluginAudioProcessorEditor::resized()
+{
+    // Logování změny velikosti
+    Logger::getInstance().log("PluginEditor/resized", "debug", "Zmena velikosti GUI: " + 
+        juce::String(getWidth()) + "x" + juce::String(getHeight()));
+    
+    // Layout - rozložení komponent
+    int margin = 10;
+    int buttonHeight = 30;
+    int headerHeight = 90;  // Prostor pro nadpis
+    
+    // Log display zabírá většinu místa
+    int logDisplayHeight = getHeight() - headerHeight - buttonHeight * 2 - margin * 4;
+    logDisplay->setBounds(margin, headerHeight, getWidth() - 2 * margin, logDisplayHeight);
+
+    // Tlačítka ve spodní části
+    int buttonY = headerHeight + logDisplayHeight + margin;
+    int buttonWidth = (getWidth() - 3 * margin) / 2;
+    
+    toggleLogging->setBounds(margin, buttonY, buttonWidth, buttonHeight);
+    clearLogsButton->setBounds(margin * 2 + buttonWidth, buttonY, buttonWidth, buttonHeight);
+    
+    Logger::getInstance().log("PluginEditor/resized", "debug", "Layout komponent aktualizovan - log area: " + 
+        juce::String(logDisplay->getWidth()) + "x" + juce::String(logDisplay->getHeight()));
+}
+
+/**
+ * Aktualizace log display s auto-scroll na konec.
+ */
+void AudioPluginAudioProcessorEditor::updateLogDisplay()
+{
+    // Získání bufferu z Loggeru přes getter
+    const juce::StringArray& buffer = Logger::getInstance().getLogBuffer();
+
+    // Sestavení textu
+    juce::String logText;
+    for (const auto& entry : buffer)
+    {
+        logText += entry + "\n";
+    }
+
+    // Nastavení textu
+    logDisplay->setText(logText);
+
+    // Auto-scroll na konec pro sledování nových událostí
+    logDisplay->moveCaretToEnd();
+    
+    // Jednoduchý scroll na konec
+    logDisplay->scrollEditorToPositionCaret(0, logDisplay->getHeight() - 20);
+}
+
+
+===== File: PluginEditor.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\PluginEditor.h
+=====
+#pragma once
+
+#include "PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
+
+//==============================================================================
+class AudioPluginAudioProcessorEditor final : public juce::AudioProcessorEditor
+{
+public:
+    explicit AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor&);
+    ~AudioPluginAudioProcessorEditor() override;
+
+    //==============================================================================
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    // Metoda pro aktualizaci log display
+    void updateLogDisplay();
+
+private:
+    // Reference na procesor
+    AudioPluginAudioProcessor& processorRef;
+
+    // Komponenty pro logování a ovládání
+    std::unique_ptr<juce::TextEditor> logDisplay;
+    std::unique_ptr<juce::ToggleButton> toggleLogging;
+    std::unique_ptr<juce::TextButton> clearLogsButton;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
+};
+
+
+===== File: PluginProcessor.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\PluginProcessor.cpp
+=====
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+
+//==============================================================================
+AudioPluginAudioProcessor::AudioPluginAudioProcessor()
+     : AudioProcessor (BusesProperties()
+                     #if ! JucePlugin_IsMidiEffect
+                      #if ! JucePlugin_IsSynth
+                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                      #endif
+                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                     #endif
+                       ),
+       synthState_(SynthState::Uninitialized),
+       currentSampleRate_(0.0),
+       processBlockCount_(0),
+       totalMidiEvents_(0)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "=== APLIKACE SPUSTENA ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Inicializace procesoru");
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Plugin nazev: " + getName());
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Je synthesizer: " + juce::String(JucePlugin_IsSynth ? "ANO" : "NE"));
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Prijima MIDI: " + juce::String(acceptsMidi() ? "ANO" : "NE"));
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Produkuje MIDI: " + juce::String(producesMidi() ? "ANO" : "NE"));
+    
+    // Komponenty se vytvoří až v prepareToPlay kdy známe sample rate
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", 
+                              "Stav: " + getStateDescription());
+}
+
+AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "=== APLIKACE SE UKONCUJE ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Zahajeni destrukce procesoru");
+    
+    cleanupSynth();
+    Logger::getInstance().setEditor(nullptr);
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "=== DESTRUKCE DOKONCENA ===");
+}
+
+//==============================================================================
+bool AudioPluginAudioProcessor::initializeSynth(double sampleRate)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/initializeSynth", "info", "=== INICIALIZACE SYNTH KOMPONENT ===");
+    
+    // OPRAVA: Nastavení stavu na Initializing
+    synthState_.store(SynthState::Initializing);
+    
+    try {
+        // Vytvoření komponent v správném pořadí
+        sampleLibrary_ = std::make_unique<SampleLibrary>();
+        sampleLibrary_->initialize(sampleRate);
+        Logger::getInstance().log("AudioPluginAudioProcessor/initializeSynth", "info", "SampleLibrary inicializovana");
+        
+        midiStateManager_ = std::make_unique<MidiStateManager>();
+        Logger::getInstance().log("AudioPluginAudioProcessor/initializeSynth", "info", "MidiStateManager inicializovan");
+        
+        voiceManager_ = std::make_unique<VoiceManager>(16);
+        Logger::getInstance().log("AudioPluginAudioProcessor/initializeSynth", "info", "VoiceManager inicializovan (16 hlasu)");
+        
+        currentSampleRate_ = sampleRate;
+        
+        // OPRAVA: Atomické nastavení stavu na Ready
+        synthState_.store(SynthState::Ready);
+        
+        Logger::getInstance().log("AudioPluginAudioProcessor/initializeSynth", "info", 
+                                  "=== SYNTH INICIALIZACE DOKONCENA === Stav: " + getStateDescription());
+        return true;
+        
+    } catch (const std::exception& e) {
+        handleSynthError("Chyba pri inicializaci: " + std::string(e.what()));
+        return false;
+    } catch (...) {
+        handleSynthError("Neznama chyba pri inicializaci synth komponent");
+        return false;
+    }
+}
+
+void AudioPluginAudioProcessor::cleanupSynth()
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/cleanupSynth", "info", "Uvolnovani synth komponent");
+    
+    // Uvolnění v opačném pořadí než vytvoření
+    voiceManager_.reset();
+    midiStateManager_.reset();
+    sampleLibrary_.reset();
+    
+    synthState_.store(SynthState::Uninitialized);
+    Logger::getInstance().log("AudioPluginAudioProcessor/cleanupSynth", "info", "Synth komponenty uvolneny");
+}
+
+void AudioPluginAudioProcessor::handleSynthError(const std::string& errorMessage)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/handleSynthError", "error", 
+                              "SYNTH ERROR: " + juce::String(errorMessage));
+    
+    // Cleanup při chybě
+    cleanupSynth();
+    synthState_.store(SynthState::Error);
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/handleSynthError", "error", 
+                              "Stav nastaven na ERROR, komponenty uvolneny");
+}
+
+juce::String AudioPluginAudioProcessor::getStateDescription() const
+{
+    switch (synthState_.load()) {
+        case SynthState::Uninitialized: return "Neinicializovano";
+        case SynthState::Initializing: return "Inicializuje se";
+        case SynthState::Ready: return "Pripraveno";
+        case SynthState::Error: return "Chyba";
+        default: return "Neznamy stav";
+    }
+}
+
+//==============================================================================
+const juce::String AudioPluginAudioProcessor::getName() const
+{
+    return JucePlugin_Name;
+}
+
+bool AudioPluginAudioProcessor::acceptsMidi() const
+{
+   #if JucePlugin_WantsMidiInput
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool AudioPluginAudioProcessor::producesMidi() const
+{
+   #if JucePlugin_ProducesMidiOutput
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool AudioPluginAudioProcessor::isMidiEffect() const
+{
+   #if JucePlugin_IsMidiEffect
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+double AudioPluginAudioProcessor::getTailLengthSeconds() const
+{
+    return 0.0;
+}
+
+int AudioPluginAudioProcessor::getNumPrograms()
+{
+    return 1;
+}
+
+int AudioPluginAudioProcessor::getCurrentProgram()
+{
+    return 0;
+}
+
+void AudioPluginAudioProcessor::setCurrentProgram (int index)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/setCurrentProgram", "info", "Zmena programu na index: " + juce::String(index));
+    juce::ignoreUnused (index);
+}
+
+const juce::String AudioPluginAudioProcessor::getProgramName (int index)
+{
+    juce::ignoreUnused (index);
+    return {};
+}
+
+void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/changeProgramName", "info", "Zmena nazvu programu [" + juce::String(index) + "]: " + newName);
+    juce::ignoreUnused (index, newName);
+}
+
+//==============================================================================
+void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "=== PRIPRAVA AUDIO PROCESINGU ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Sample rate: " + juce::String(sampleRate, 1) + " Hz");
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Buffer size: " + juce::String(samplesPerBlock) + " samples");
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Vstupni kanaly: " + juce::String(getTotalNumInputChannels()));
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Vystupni kanaly: " + juce::String(getTotalNumOutputChannels()));
+    
+    // Výpočet latence
+    double latencyMs = (double)samplesPerBlock / sampleRate * 1000.0;
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Odhadovana latence: " + juce::String(latencyMs, 2) + " ms");
+    
+    // OPRAVA: Exception-safe inicializace nebo reinicializace synth komponent
+    if (synthState_.load() != SynthState::Ready || currentSampleRate_ != sampleRate) {
+        if (synthState_.load() != SynthState::Uninitialized) {
+            Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Reinicializace kvuli zmene sample rate");
+            cleanupSynth();
+        }
+        
+        if (!initializeSynth(sampleRate)) {
+            Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "error", 
+                                      "KRITICKA CHYBA: Inicializace synth selhala!");
+            return; // Plugin zůstane v error stavu
+        }
+    }
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", 
+                              "=== AUDIO PROCESSING PRIPRAVEN === Stav: " + getStateDescription());
+}
+
+void AudioPluginAudioProcessor::releaseResources()
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/releaseResources", "info", "=== UVOLNOVANI AUDIO ZDROJU ===");
+    
+    // Resetování čítačů
+    processBlockCount_ = 0;
+    totalMidiEvents_ = 0;
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/releaseResources", "info", "Audio processing zastaven");
+}
+
+//==============================================================================
+bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+  #if JucePlugin_IsMidiEffect
+    juce::ignoreUnused (layouts);
+    return true;
+  #else
+    auto mainOutput = layouts.getMainOutputChannelSet();
+    auto mainInput = layouts.getMainInputChannelSet();
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "debug", 
+        "Kontrola layoutu - Input: " + mainInput.getDescription() + 
+        ", Output: " + mainOutput.getDescription());
+    
+    if (mainOutput != juce::AudioChannelSet::mono() && mainOutput != juce::AudioChannelSet::stereo())
+    {
+        Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "warn", 
+            "Nepodporovany output layout: " + mainOutput.getDescription());
+        return false;
+    }
+
+   #if ! JucePlugin_IsSynth
+    if (mainOutput != mainInput)
+    {
+        Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "warn", 
+            "Input a output layout se neshoduji");
+        return false;
+    }
+   #endif
+
+    return true;
+  #endif
+}
+
+//==============================================================================
+void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    juce::ScopedNoDenormals noDenormals;
+    
+    // OPRAVA: Explicitní kontrola stavu s informativním logováním
+    auto currentState = synthState_.load();
+    if (currentState != SynthState::Ready) {
+        // Vymažeme buffer a logujeme důvod
+        buffer.clear();
+        
+        static int errorLogCount = 0;
+        if (errorLogCount < 5) { // Omezíme spam v logu
+            Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "warn", 
+                                      "Audio block preskocen - stav: " + getStateDescription());
+            errorLogCount++;
+        }
+        return;
+    }
+    
+    // Počítadlo pro optimalizaci logování
+    processBlockCount_++;
+    
+    // Detailní logování prvních bloků
+    if (processBlockCount_ <= 3) {
+        Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
+            "Audio blok #" + juce::String(processBlockCount_) + " - velikost: " + juce::String(buffer.getNumSamples()) + 
+            " samples, kanaly: " + juce::String(buffer.getNumChannels()));
+    } else if (processBlockCount_ % 1000 == 0) {
+        Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "debug", 
+            "Zpracovano " + juce::String(processBlockCount_) + " audio bloku, celkem MIDI: " + juce::String(totalMidiEvents_));
+    }
+    
+    // MIDI EVENT PROCESSING
+    if (!midiMessages.isEmpty()) {
+        int midiEventsInBlock = 0;
+        
+        // Počítání MIDI událostí pro logování
+        for (const auto& midiMetadata : midiMessages) {
+            midiEventsInBlock++;
+            totalMidiEvents_++;
+        }
+        
+        if (midiEventsInBlock > 0) {
+            Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
+                "MIDI udalosti v bloku: " + juce::String(midiEventsInBlock) + 
+                " (celkem: " + juce::String(totalMidiEvents_) + ")");
+        }
+        
+        // Zpracování MIDI událostí přes MidiStateManager
+        midiStateManager_->processMidiBuffer(midiMessages);
+    }
+    
+    // VOICE MANAGEMENT - zpracování MIDI událostí do hlasů
+    voiceManager_->processMidiEvents(*midiStateManager_);
+    
+    // AUDIO GENERATION - KRITICKÁ OPRAVA
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    
+    // Vyčištění přebytečných výstupních kanálů
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i) {
+        buffer.clear(i, 0, buffer.getNumSamples());
+    }
+    
+    // OPRAVA: Generování audio pro každý výstupní kanál
+    for (int channel = 0; channel < totalNumOutputChannels; ++channel) {
+        auto* channelData = buffer.getWritePointer(channel);
+        
+        // Vymazání bufferu před generováním
+        std::fill(channelData, channelData + buffer.getNumSamples(), 0.0f);
+        
+        // Generování audio ze všech hlasů
+        voiceManager_->generateAudio(channelData, buffer.getNumSamples(), *sampleLibrary_);
+    }
+    
+    // Voice management refresh (cleanup neaktivních hlasů)
+    voiceManager_->refresh();
+    
+    // Analýza výstupní amplitudy pro první bloky
+    if (processBlockCount_ <= 3 && buffer.getNumChannels() > 0) {
+        float maxAmplitude = 0.0f;
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel) {
+            auto* channelData = buffer.getReadPointer(channel);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample) {
+                maxAmplitude = juce::jmax(maxAmplitude, std::abs(channelData[sample]));
+            }
+        }
+        Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
+            "Maximalni vystupni amplituda: " + juce::String(maxAmplitude, 6));
+    }
+}
+
+//==============================================================================
+bool AudioPluginAudioProcessor::hasEditor() const
+{
+    return true;
+}
+
+juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/createEditor", "info", "=== VYTVARENI GUI EDITORU ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/createEditor", "info", "Inicializace uzivatelskeho rozhrani");
+    return new AudioPluginAudioProcessorEditor (*this);
+}
+
+//==============================================================================
+void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/getStateInformation", "info", "Ukladani stavu pluginu");
+    juce::ignoreUnused (destData);
+}
+
+void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    Logger::getInstance().log("AudioPluginAudioProcessor/setStateInformation", "info", 
+        "Nacitani stavu pluginu (velikost: " + juce::String(sizeInBytes) + " bytu)");
+    juce::ignoreUnused (data, sizeInBytes);
+}
+
+//==============================================================================
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new AudioPluginAudioProcessor();
+}
+
+
+===== File: PluginProcessor.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\PluginProcessor.h
+=====
+#pragma once
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "Logger.h"
+#include "SampleLibrary.h"
+#include "MidiStateManager.h"
+#include "VoiceManager.h"
+
+//==============================================================================
+/**
+ * AudioPluginAudioProcessor - hlavní třída audio pluginu
+ * OPRAVA: Přidání explicitních error states pro lepší debugging
+ */
+class AudioPluginAudioProcessor final : public juce::AudioProcessor
+{
+public:
+    // OPRAVA: Enum pro explicitní stavy synth komponent
+    enum class SynthState { 
+        Uninitialized, 
+        Initializing, 
+        Ready, 
+        Error 
+    };
+
+    AudioPluginAudioProcessor();
+    ~AudioPluginAudioProcessor() override;
+
+    //==============================================================================
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override;
+
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    using AudioProcessor::processBlock;
+
+    //==============================================================================
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override;
+
+    //==============================================================================
+    const juce::String getName() const override;
+    bool acceptsMidi() const override;
+    bool producesMidi() const override;
+    bool isMidiEffect() const override;
+    double getTailLengthSeconds() const override;
+
+    //==============================================================================
+    int getNumPrograms() override;
+    int getCurrentProgram() override;
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
+    void changeProgramName (int index, const juce::String& newName) override;
+
+    //==============================================================================
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
+
+    // OPRAVA: Getter pro aktuální stav (pro debugging)
+    SynthState getCurrentState() const { return synthState_.load(); }
+    juce::String getStateDescription() const;
+
+private:
+    //==============================================================================
+    // OPRAVA: Exception-safe metody pro inicializaci
+    bool initializeSynth(double sampleRate);
+    void cleanupSynth();
+    
+    // OPRAVA: Error recovery metoda
+    void handleSynthError(const std::string& errorMessage);
+
+    // Synth komponenty - vytvářejí se až při prepareToPlay
+    std::unique_ptr<SampleLibrary> sampleLibrary_;
+    std::unique_ptr<MidiStateManager> midiStateManager_;
+    std::unique_ptr<VoiceManager> voiceManager_;
+    
+    // OPRAVA: Atomic state management pro thread safety
+    std::atomic<SynthState> synthState_{SynthState::Uninitialized};
+    double currentSampleRate_;
+    
+    // Debug counters pro optimalizaci logování
+    int processBlockCount_;
+    int totalMidiEvents_;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
+};
+
+
+===== File: README.md =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\README.md
+=====
+## Cesty na build soubory
+
+[build]   juce_vst3_helper.vcxproj .\build\Debug\juce_vst3_helper.exe
+[build]   IthacaPlayer.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\IthacaPlayer_SharedCode.lib
+[build]   IthacaPlayer_VST3.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3
+[build]   IthacaPlayer_Standalone.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe
+
+
+## Nastavení vývojového prostředí
+
+Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) proveďte následující kroky. Předpokládá se instalace Visual Studio Build Tools (s MSVC kompilátorem: https://visualstudio.microsoft.com/cs/visual-cpp-build-tools/) a CMake.
+
+### Požadavky
+- Visual Studio Build Tools (MSVC kompilátor).
+- CMake nainstalovaný a přidán do PATH (např. C:\Program Files\CMake\bin).
+- VS Code.
+
+### Kroky nastavení
+1. **Instalace rozšíření ve VS Code**:
+   - Otevřete Extensions (Ctrl+Shift+X).
+   - Nainstalujte: C/C++ (od Microsoftu pro podporu C++ syntaxe, IntelliSense a ladění) a CMake Tools (od Microsoftu pro integraci CMake).
+   - Restartujte VS Code.
+2. **Otevření projektu**:
+   - Přejděte na File > Open Folder a vyberte složku s CMakeLists.txt.
+3. **Výběr kompilátoru (kit)**:
+   - V Command Palette (Ctrl+Shift+P) napište "CMake: Select a Kit".
+   - Vyberte "amd64" (64-bit) nebo ekvivalent podle potřeby (např. x64 pro moderní systémy).
+4. **Konfigurace projektu**:
+   - V Command Palette napište "CMake: Configure". To vygeneruje build soubory (obvykle ve složce "build").
+5. **Build projektu**:
+   - V Command Palette napište "CMake: Build" nebo použijte Shift+Ctrl+B (nyní nabídne CMake úlohy).
+6. **Debugování (volitelně)**:
+   - Nastavte breakpointy a spusťte "CMake: Debug" v Command Palette.
+
+---
+
+# IthacaPlayer - Software Synthesizer
+
+Audio plugin synthesizer implementovaný v JUCE frameworku, inspirovaný hardwarovými syntezátory s modulární architekturou.
+
+## Architektura Systému
+
+### Přehled Komponent
+
+```
+AudioPluginAudioProcessor (Main Controller)
+├── SampleLibrary (Pre-computed Audio Storage)
+├── MidiStateManager (MIDI Event Processing)  
+├── VoiceManager (Voice Allocation & Control)
+└── Logger (Debug & Monitoring)
+```
+
+## Core Komponenty
+
+### 1. SampleLibrary
+**Účel:** Správa pre-computed audio sampelů pro jednotlivé MIDI noty
+
+**Klíčové vlastnosti:**
+- **Static allocation:** 292MB RAM pro 128 MIDI not × 12 sekund × sample rate
+- **Pre-computed sine waves:** Generování při inicializaci místo realtime syntézy
+- **Memory management:** Per-nota allocation s bezpečným uvolňováním
+- **Rozšiřitelnost:** Připraveno pro načítání WAV souborů
+
+**API:**
+```cpp
+SampleLibrary(double sampleRate)
+bool generateSineWaveForNote(uint8_t midiNote, float frequency)
+const float* getSampleData(uint8_t midiNote)
+uint32_t getSampleLength(uint8_t midiNote)
+bool isNoteAvailable(uint8_t midiNote)
+```
+
+**Implementační detaily:**
+- Každý sample má pevnou délku 12 sekund
+- Amplitude 0.3f pro prevenci clippingu
+- Thread-safe přístup k sample datům
+
+### 2. MidiStateManager
+**Účel:** Centrální správa MIDI stavu a událostí
+
+**Inspirováno:** Hardware MidiParser + ActiveKeys pattern
+- Circular buffer approach pro MIDI zpracování
+- Queue-based event distribution
+- State tracking pro aktivní noty a controllery
+
+**Klíčové struktury:**
+```cpp
+struct ActiveNote {
+    uint8_t key, velocity, channel;
+    bool isActive;
+    uint32_t triggerTime; // Pro voice stealing
+};
+```
+
+**Queue Management:**
+- Oddělené queues pro Note On/Off události
+- Per-channel event routing (16 MIDI kanálů)
+- Pop/push pattern podobný hardware implementaci
+
+**API:**
+```cpp
+void processMidiBuffer(const juce::MidiBuffer& midiBuffer)
+uint8_t popNoteOn(uint8_t channel)   // Returns key nebo 0xff
+uint8_t popNoteOff(uint8_t channel)  // Returns key nebo 0xff
+void setPitchWheel(int16_t value)
+void setControllerValue(uint8_t channel, uint8_t controller, uint8_t value)
+```
+
+### 3. VoiceManager
+**Účel:** Polyphonic voice allocation a audio generování
+
+**Inspirováno:** Hardware Performer class
+- 16 polyphonic hlasů
+- Sophisticated voice stealing algorithm
+- Queue-based priority system
+
+**Voice Allocation Algorithm:**
+```cpp
+int getFreeVoice(uint8_t note) {
+    // 1. Hledá existující hlas s touto notou
+    // 2. Hledá neaktivní hlas s nejvyšší queue pozicí  
+    // 3. Krade aktivní hlas s nejvyšší queue pozicí
+}
+```
+
+**Queue Management (mixleQueue):**
+Algoritmus převzatý z HW implementace:
+1. Vybraný hlas → queue pozice 0
+2. Ostatní hlasy → pozice++
+3. Komprese queue pozic > původní pozice
+
+**SynthVoice vlastnosti:**
+- Sample position tracking
+- Velocity scaling
+- Pitch wheel support
+- No-loop playback (12s sample se přehraje jednou)
+
+### 4. Logger System
+**Účel:** Real-time debugging a monitoring
+
+**Vlastnosti:**
+- Thread-safe logování z audio vlákna
+- Sliding window buffer (100 zpráv)
+- Kategorizace: info/debug/warn
+- GUI integration přes MessageManager
+
+**Usage Pattern:**
+```cpp
+Logger::getInstance().log("Component/method", "severity", "message");
+```
+
+## Audio Processing Flow
+
+### Main Processing Loop (processBlock)
+
+```cpp
+void processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiMessages) {
+    // 1. MIDI Processing
+    midiStateManager_->processMidiBuffer(midiMessages);
+    
+    // 2. Voice Management  
+    voiceManager_->processMidiEvents(*midiStateManager_);
+    
+    // 3. Audio Generation
+    voiceManager_->generateAudio(channelData, numSamples, *sampleLibrary_);
+    
+    // 4. Refresh Cycle
+    voiceManager_->refresh();
+}
+```
+
+### Initialization Sequence
+
+```
+Constructor:
+├── Create SampleLibrary (dummy sample rate)
+├── Create MidiStateManager  
+└── Create VoiceManager (16 voices)
+
+prepareToPlay:
+├── Reinit SampleLibrary (correct sample rate)
+├── Generate sine wave pro Middle C (nota 60)
+└── Mark synthInitialized = true
+```
+
+## Memory Management
+
+### Sample Library Storage
+- **Celková alokace:** ~292MB pro kompletní library
+- **Current prototype:** Pouze 1 nota (Middle C) = ~2.3MB
+- **Allocation strategy:** On-demand per nota
+- **Deallocation:** Automatic při destrukci
+
+### Voice Memory
+- **16 SynthVoice objektů:** Minimální memory footprint  
+- **Sample position tracking:** uint32_t per voice
+- **State variables:** note, velocity, gate status
+
+## MIDI Implementation
+
+### Podporované MIDI zprávy:
+- **Note On/Off:** Kompletní support včetně Note On velocity 0
+- **Pitch Wheel:** 14-bit resolution (-8192 až +8191)
+- **Control Change:** 128 controllers × 16 kanálů
+- **Channel support:** 16 MIDI kanálů
+
+### MIDI Routing:
+- **Prototype:** Pouze kanál 0 aktivní
+- **Full version:** Všech 16 kanálů připraveno
+
+## Build System
+
+### CMake Configuration:
+```cmake
+IS_SYNTH TRUE
+NEEDS_MIDI_INPUT TRUE  
+FORMATS AU VST3 Standalone
+```
+
+### Source Files:
+```
+Core Audio:
+├── PluginProcessor.h/cpp
+├── PluginEditor.h/cpp
+
+Synth Engine:
+├── SampleLibrary.h/cpp
+├── MidiStateManager.h/cpp
+├── VoiceManager.h/cpp
+
+Utilities:
+└── Logger.h/cpp
+```
+
+## Development Workflow
+
+### Current Prototype Status:
+- **Working:** MIDI input, voice allocation, sine wave playback
+- **Limitation:** Pouze Middle C (nota 60) generuje audio
+- **Voice count:** 16 polyphonic
+- **Sample length:** 12 sekund per nota
+
+### Next Development Steps:
+1. **Full note range:** Generate sine waves pro všech 128 not
+2. **WAV loading:** Implementace načítání externích sampelů
+3. **ADSR envelope:** Note-off handling s envelope
+4. **Effects:** Reverb, filter, modulation
+5. **Preset system:** Save/load configurations
+
+### Debug Features:
+- **Real-time logging:** Vše se loguje do GUI
+- **MIDI monitoring:** Detailní MIDI event tracking  
+- **Voice status:** Queue positions, active notes
+- **Performance:** Audio block processing statistics
+
+## Technical Specifications
+
+### Audio:
+- **Sample rates:** 44.1kHz - 192kHz support
+- **Bit depth:** 32-bit float processing
+- **Latency:** Buffer size dependent (~10ms při 480 samples/48kHz)
+- **Polyphony:** 16 hlasů
+
+### MIDI:
+- **Input latency:** Sub-millisecond  
+- **Jitter:** Minimal díky JUCE MIDI buffering
+- **Throughput:** Unlimited MIDI events per block
+
+### Memory:
+- **Runtime:** ~292MB při full library
+- **Prototype:** ~2.3MB current usage
+- **Stack:** Minimal - většinou heap allocation
+
+### Performance:
+- **CPU usage:** Low - pre-computed samples
+- **Real-time safe:** Ano - žádné allokace v audio vlákně
+- **Thread safety:** Logger + MIDI state management
+
+## Architecture Decisions
+
+### Pre-computed vs Real-time:
+**Volba:** Pre-computed samples
+**Důvod:** Konzistentní CPU usage, možnost komplexních waveforms
+**Trade-off:** Vysoká paměť vs stabilní performance
+
+### Voice Stealing Algorithm:
+**Volba:** Queue-based priority system  
+**Důvod:** Zachování hardware workflow, předvídatelné chování
+**Benefit:** Longest-idle voice stealing
+
+### MIDI State Management:
+**Volba:** Centrální state s queue distribution
+**Důvod:** Thread safety, clean separation of concerns
+**Pattern:** Hardware MidiParser + ActiveKeys adaptace
+
+### Logging Strategy:
+**Volba:** Comprehensive real-time logging
+**Důvod:** Complex debugging požadavky
+**Implementation:** Thread-safe async GUI updates
+
+
+===== File: SampleLibrary.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\SampleLibrary.cpp
+=====
+#include "SampleLibrary.h"
+#include <cmath>
+
+SampleLibrary::SampleLibrary()
+    : logger_(Logger::getInstance())
+{
+    // nic dál v konstruktoru - actual allocation happens in initialize()
+}
+
+/*
+ * initialize
+ *  - uloží sampleRate a vygeneruje všechno (MIN_NOTE..MAX_NOTE)
+ *  - pokud generování nějaké noty selže, loguje a pokračuje (nepřeruší ostatní)
+ */
+void SampleLibrary::initialize(double sampleRate)
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+
+    if (sampleRate <= 0.0) {
+        logger_.log("SampleLibrary/initialize", "error", "Invalid sampleRate: " + juce::String(sampleRate));
+        throw std::invalid_argument("Invalid sampleRate");
+    }
+
+    sampleRate_ = sampleRate;
+    clear();
+
+    logger_.log("SampleLibrary/initialize", "info",
+                "Inicializace sample library se sampleRate=" + juce::String(sampleRate_));
+
+    int success = 0;
+    int fail = 0;
+    for (uint8_t n = MIN_NOTE; n <= MAX_NOTE; ++n) {
+        if (generateSampleForNote(n)) ++success;
+        else ++fail;
+    }
+
+    logger_.log("SampleLibrary/initialize", "info",
+                "Generování samplů dokončeno. Success: " + juce::String(success) +
+                " Fail: " + juce::String(fail));
+}
+
+/*
+ * clear - vymaže interní data
+ */
+void SampleLibrary::clear()
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    for (auto& seg : sampleSegments_)
+        seg.reset();
+
+    logger_.log("SampleLibrary/clear", "debug", "SampleLibrary cleared");
+}
+
+/*
+ * generateSampleForNote
+ *  - vygeneruje sinusovku délky SAMPLE_SECONDS pro danou notu
+ *  - vrátí true pokud uspěje
+ */
+bool SampleLibrary::generateSampleForNote(uint8_t note)
+{
+    // lokální kalkulace bez držení locku po dobu generování (alokačně-intenzivní)
+    double freq = getFrequencyForNote(note);
+    uint32_t sampleLength = static_cast<uint32_t>(sampleRate_ * SAMPLE_SECONDS);
+
+    if (sampleLength < 1) {
+        logger_.log("SampleLibrary/generateSampleForNote", "error",
+                    "Invalid sample length for note " + juce::String((int)note));
+        return false;
+    }
+
+    std::unique_ptr<float[]> tmpData;
+    try {
+        tmpData = std::make_unique<float[]>(sampleLength);
+    } catch (const std::bad_alloc&) {
+        logger_.log("SampleLibrary/generateSampleForNote", "error",
+                    "Allocation failed for note " + juce::String((int)note));
+        return false;
+    }
+
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    const double phaseInc = twoPi * freq / sampleRate_;
+
+    for (uint32_t i = 0; i < sampleLength; ++i) {
+        double phase = phaseInc * static_cast<double>(i);
+        // explicit cast -> potlačí warning C4244
+        tmpData[i] = SAMPLE_AMPLITUDE * static_cast<float>(std::sin(phase));
+    }
+
+    // commit: uložení do interní struktury pod lockem (atomic-ish)
+    {
+        std::lock_guard<std::mutex> lock(accessMutex_);
+        SampleSegment& seg = sampleSegments_[note];
+        seg.sampleData = std::move(tmpData);
+        seg.lengthSamples = sampleLength;
+        seg.midiNote = note;
+        seg.isAllocated = true;
+    }
+
+    logger_.log("SampleLibrary/generateSampleForNote", "debug",
+                "Vzorek vygenerován pro notu " + juce::String((int)note) +
+                " freq=" + juce::String(freq, 2) +
+                " samples=" + juce::String(sampleLength));
+    return true;
+}
+
+/*
+ * getSampleData / getSampleLength / isNoteAvailable
+ *  - vrací read-only data (chráněné mutexem)
+ */
+const float* SampleLibrary::getSampleData(uint8_t midiNote) const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
+        return sampleSegments_[midiNote].sampleData.get();
+    return nullptr;
+}
+
+uint32_t SampleLibrary::getSampleLength(uint8_t midiNote) const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
+        return sampleSegments_[midiNote].lengthSamples;
+    return 0;
+}
+
+bool SampleLibrary::isNoteAvailable(uint8_t midiNote) const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated;
+}
+
+double SampleLibrary::getFrequencyForNote(uint8_t midiNote) const
+{
+    // standardní formule A4=440Hz (MIDI 69)
+    return 440.0 * std::pow(2.0, (static_cast<int>(midiNote) - 69) / 12.0);
+}
+
+
+===== File: SampleLibrary.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\SampleLibrary.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <memory>
+#include <array>
+#include "Logger.h"
+
+/*
+ * SampleSegment
+ *   - vlastní jednoduché úložiště pro float vzorek (unique_ptr)
+ *   - lengthSamples = délka v samplech
+ */
+struct SampleSegment
+{
+    std::unique_ptr<float[]> sampleData;
+    uint32_t lengthSamples{0};
+    uint8_t midiNote{0};
+    bool isAllocated{false};
+
+    void reset()
+    {
+        sampleData.reset();
+        lengthSamples = 0;
+        midiNote = 0;
+        isAllocated = false;
+    }
+};
+
+/*
+ * SampleLibrary
+ * - refaktorizovaná, thread-safe (interní mutex pro mutace)
+ * - initialize(sampleRate) připraví (vygeneruje) všechny vzorky v rozsahu MIN_NOTE..MAX_NOTE
+ * - poskytuje read-only přístup: getSampleData/getSampleLength/isNoteAvailable
+ */
+class SampleLibrary
+{
+public:
+    SampleLibrary();
+    ~SampleLibrary() = default;
+
+    // Inicializace knihovny (nutné zavolat před použitím)
+    // Vygeneruje všechny vzorky v rozsahu MIN_NOTE..MAX_NOTE (12 sekund každý)
+    void initialize(double sampleRate);
+
+    // Vyčistí všechny vzorky (uvolní paměť)
+    void clear();
+
+    // Generuje a uloží vzorek pro konkrétní notu (použito interně i externě)
+    // Vrací true pokud generace proběhla úspěšně.
+    bool generateSampleForNote(uint8_t note);
+
+    // Read-only přístup
+    const float* getSampleData(uint8_t midiNote) const;
+    uint32_t getSampleLength(uint8_t midiNote) const;
+    bool isNoteAvailable(uint8_t midiNote) const;
+
+    // Konstanty
+    static constexpr uint8_t MIN_NOTE = 21;   // A0
+    static constexpr uint8_t MAX_NOTE = 108;  // C8
+    static constexpr double SAMPLE_SECONDS = 12.0; // délka v sekundách
+
+private:
+    // interní helper pro frekvenci
+    double getFrequencyForNote(uint8_t midiNote) const;
+
+    mutable std::mutex accessMutex_;                // chrání sampleSegments_
+    std::array<SampleSegment, 128> sampleSegments_; // úložiště pro všechny MIDInoty
+    double sampleRate_{44100.0};
+    Logger& logger_;
+    static constexpr float SAMPLE_AMPLITUDE = 0.25f; // bezpečná amplitude
+};
+
+
+===== File: VoiceManager.cpp =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\VoiceManager.cpp
+=====
+#include "VoiceManager.h"
+#include "Logger.h"
+
+SynthVoice::SynthVoice()
+    : logger_(Logger::getInstance())
+{
+    reset();
+}
+
+void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library)
+{
+    reset();
+
+    midiNote_ = midiNote;
+    velocity_ = velocity;
+
+    if (!library.isNoteAvailable(midiNote)) {
+        logger_.log("SynthVoice/start", "error", "Requested note not available: " + juce::String((int)midiNote));
+        isActive_ = false;
+        return;
+    }
+
+    sampleData_ = library.getSampleData(midiNote);
+    sampleLength_ = library.getSampleLength(midiNote);
+
+    if (!sampleData_ || sampleLength_ == 0) {
+        logger_.log("SynthVoice/start", "error", "Invalid sample for note " + juce::String((int)midiNote));
+        isActive_ = false;
+        return;
+    }
+
+    position_ = 0;
+    isActive_ = true;
+
+    logger_.log("SynthVoice/start", "debug", "Started note " + juce::String((int)midiNote) +
+                                             " len=" + juce::String(sampleLength_));
+}
+
+void SynthVoice::stop()
+{
+    isActive_ = false;
+}
+
+void SynthVoice::reset()
+{
+    midiNote_ = 0;
+    velocity_ = 0;
+    isActive_ = false;
+    sampleData_ = nullptr;
+    sampleLength_ = 0;
+    position_ = 0;
+}
+
+void SynthVoice::render(float* outputBuffer, int numSamples)
+{
+    if (!isActive_ || sampleData_ == nullptr || sampleLength_ == 0)
+        return;
+
+    // jednoduchý lineární gain podle velocity
+    const float gain = static_cast<float>(velocity_) / 127.0f;
+
+    for (int i = 0; i < numSamples; ++i) {
+        if (position_ >= sampleLength_) {
+            // dohráno -> disable
+            stop();
+            break;
+        }
+        outputBuffer[i] += sampleData_[position_] * gain;
+        ++position_;
+    }
+}
+
+// ======================== VoiceManager =========================
+
+VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
+    : logger_(Logger::getInstance()), sampleLibrary_(library)
+{
+    voices_.reserve(numVoices);
+    for (int i = 0; i < numVoices; ++i)
+        voices_.emplace_back(std::make_unique<SynthVoice>());
+
+    logger_.log("VoiceManager/constructor", "info", "VoiceManager created with " + juce::String(numVoices) + " voices");
+}
+
+void VoiceManager::processMidiEvents(MidiStateManager& midiState)
+{
+    // NOTE ON
+    for (int ch = 0; ch < 16; ++ch) {
+        while (true) {
+            int raw = midiState.popNoteOn(ch);
+            if (raw == 0xff) break;
+            uint8_t note = static_cast<uint8_t>(raw);
+            uint8_t vel = static_cast<uint8_t>(midiState.getVelocity(ch, note));
+            startVoice(note, vel);
+        }
+    }
+
+    // NOTE OFF
+    for (int ch = 0; ch < 16; ++ch) {
+        while (true) {
+            int raw = midiState.popNoteOff(ch);
+            if (raw == 0xff) break;
+            uint8_t note = static_cast<uint8_t>(raw);
+            stopVoice(note);
+        }
+    }
+}
+
+void VoiceManager::generateAudio(float* buffer, int numSamples)
+{
+    if (buffer == nullptr || numSamples <= 0) return;
+
+    // mix všech aktivních hlasů
+    for (auto& v : voices_) {
+        if (v->isActive()) v->render(buffer, numSamples);
+    }
+}
+
+void VoiceManager::refresh()
+{
+    // může být rozšířeno o statistiky / voice stealing atd.
+}
+
+void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
+{
+    // hledejte volný hlas
+    for (auto& v : voices_) {
+        if (!v->isActive()) {
+            v->start(midiNote, velocity, sampleLibrary_);
+            return;
+        }
+    }
+
+    // voice stealing: recyklovat nejstarší (zjednodušeno: index 0)
+    if (!voices_.empty()) {
+        voices_[0]->start(midiNote, velocity, sampleLibrary_);
+        logger_.log("VoiceManager/startVoice", "warn", "Voice stealing: recycled voice 0 for note " + juce::String((int)midiNote));
+    }
+}
+
+void VoiceManager::stopVoice(uint8_t midiNote)
+{
+    for (auto& v : voices_) {
+        if (v->isActive() && v->getNote() == midiNote) {
+            v->stop();
+            return;
+        }
+    }
+}
+
+
+===== File: VoiceManager.h =====
+Path: C:\Users\nemej992\Documents\Repos\IthacaPlayer\VoiceManager.h
+=====
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+#include "SampleLibrary.h"
+#include "MidiStateManager.h"
+#include "Logger.h"
+
+/*
+ * SynthVoice: jednoduchý, real-time-friendly renderer,
+ * drží pointer na readonly data (ne vlastní) a pozici.
+ */
+class SynthVoice
+{
+public:
+    SynthVoice();
+
+    // start: nastavení noty/velocity a ukazatele na data
+    void start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library);
+
+    // stop: okamžitě přestane být aktivní (může být změněno na release-phase)
+    void stop();
+
+    // reset: kompletní návrat do default stavu
+    void reset();
+
+    // render: zapíše numSamples do bufferu (přičítá)
+    void render(float* outputBuffer, int numSamples);
+
+    bool isActive() const { return isActive_; }
+    uint8_t getNote() const { return midiNote_; }
+
+private:
+    Logger& logger_;
+
+    uint8_t midiNote_{0};
+    uint8_t velocity_{0};
+    bool isActive_{false};
+
+    const float* sampleData_{nullptr};
+    uint32_t sampleLength_{0};
+    uint32_t position_{0};
+};
+
+/*
+ * VoiceManager: spravuje vector hlasů, nutně je konstruován s referencí na SampleLibrary.
+ * Tím garantujeme, že při konstrukci existuje sample library a nelze zde mít nullptr.
+ */
+class VoiceManager
+{
+public:
+    // Konstruktor vyžaduje referenci na existující SampleLibrary (nelze být nullptr).
+    VoiceManager(const SampleLibrary& library, int numVoices = 16);
+
+    ~VoiceManager() = default;
+
+    // processMidiEvents čte queue z MidiStateManager a spouští/staví hlasy
+    void processMidiEvents(MidiStateManager& midiState);
+
+    // generateAudio mixuje audio z jednotlivých hlasů
+    void generateAudio(float* buffer, int numSamples);
+
+    // refresh: housekeeping (může implementovat voice stealing, atd.)
+    void refresh();
+
+private:
+    Logger& logger_;
+    const SampleLibrary& sampleLibrary_; // povinná reference
+    std::vector<std::unique_ptr<SynthVoice>> voices_;
+
+    void startVoice(uint8_t midiNote, uint8_t velocity);
+    void stopVoice(uint8_t midiNote);
+};
+
+
