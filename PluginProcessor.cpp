@@ -1,6 +1,16 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+// Podmíněné logování pro tento soubor (defaultně vypnuto kvůli frekvenci volání)
+#define LOGGING_ENABLED false
+
+// Pro debug na konzoli (stdout)
+#include <iostream>
+#ifdef _WIN32
+#include <windows.h>  // Pro AllocConsole na Windows
+#include <cstdio>     // Pro freopen_s
+#endif
+
 //==============================================================================
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
      : AudioProcessor (BusesProperties()
@@ -10,25 +20,72 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ), consoleAllocated(false)
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Inicializace procesoru");
+    #endif
+
+    // Debug výstup pro Standalone režim - otevření konzole a výpis (bezpečnější verze pro Windows)
+    #ifdef _WIN32
+    if (AllocConsole()) {
+        consoleAllocated = true;
+        FILE* stream = nullptr;
+        errno_t err = freopen_s(&stream, "CONOUT$", "w", stdout);
+        if (err == 0) {
+            std::cout << "Standalone režim spuštěn - plugin inicializován." << std::endl;
+        }
+    }
+    #else
+    std::cout << "Standalone režim spuštěn - plugin inicializován." << std::endl;
+    #endif
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Destrukce procesoru");
+    #endif
+
+    // DŮLEŽITÉ: Nejprve odstraníme referenci na editor v Loggeru
+    Logger::getInstance().setEditor(nullptr);
+
+    // Výpis o ukončení programu (bez blokujícího čekání)
+    std::cout << "Program ukončen korektně (destruktor procesoru volán)." << std::endl;
+
+    // ODEBRANÉ: Blokující čekání na input - to způsobovalo pády!
+    // std::cout << "Stiskněte Enter pro ukončení..." << std::endl;
+    // std::cin.get();
+
+    // Bezpečné uvolnění konzole na Windows
+    #ifdef _WIN32
+    if (consoleAllocated) {
+        fclose(stdout);
+        FreeConsole();
+    }
+    #endif
 }
 
 //==============================================================================
 const juce::String AudioPluginAudioProcessor::getName() const
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getName", "debug", "Volání getName");
+    #endif
     return JucePlugin_Name;
 }
 
 bool AudioPluginAudioProcessor::acceptsMidi() const
 {
    #if JucePlugin_WantsMidiInput
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/acceptsMidi", "debug", "Přijímá MIDI: true");
+    #endif
     return true;
    #else
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/acceptsMidi", "debug", "Přijímá MIDI: false");
+    #endif
     return false;
    #endif
 }
@@ -36,8 +93,14 @@ bool AudioPluginAudioProcessor::acceptsMidi() const
 bool AudioPluginAudioProcessor::producesMidi() const
 {
    #if JucePlugin_ProducesMidiOutput
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/producesMidi", "debug", "Produkuje MIDI: true");
+    #endif
     return true;
    #else
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/producesMidi", "debug", "Produkuje MIDI: false");
+    #endif
     return false;
    #endif
 }
@@ -45,78 +108,114 @@ bool AudioPluginAudioProcessor::producesMidi() const
 bool AudioPluginAudioProcessor::isMidiEffect() const
 {
    #if JucePlugin_IsMidiEffect
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/isMidiEffect", "debug", "Je MIDI efekt: true");
+    #endif
     return true;
    #else
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/isMidiEffect", "debug", "Je MIDI efekt: false");
+    #endif
     return false;
    #endif
 }
 
 double AudioPluginAudioProcessor::getTailLengthSeconds() const
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getTailLengthSeconds", "debug", "Délka tail: 0.0");
+    #endif
     return 0.0;
 }
 
 int AudioPluginAudioProcessor::getNumPrograms()
 {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getNumPrograms", "debug", "Počet programů: 1");
+    #endif
+    return 1;
 }
 
 int AudioPluginAudioProcessor::getCurrentProgram()
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getCurrentProgram", "debug", "Aktuální program: 0");
+    #endif
     return 0;
 }
 
 void AudioPluginAudioProcessor::setCurrentProgram (int index)
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/setCurrentProgram", "info", "Nastavení programu: " + juce::String(index));
+    #endif
     juce::ignoreUnused (index);
 }
 
 const juce::String AudioPluginAudioProcessor::getProgramName (int index)
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getProgramName", "debug", "Název programu pro index: " + juce::String(index));
+    #endif
     juce::ignoreUnused (index);
     return {};
 }
 
 void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/changeProgramName", "info", "Změna názvu programu: " + newName);
+    #endif
     juce::ignoreUnused (index, newName);
 }
 
 //==============================================================================
 void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Příprava na přehrávání: sampleRate=" + juce::String(sampleRate) + ", samplesPerBlock=" + juce::String(samplesPerBlock));
+    #endif
     juce::ignoreUnused (sampleRate, samplesPerBlock);
 }
 
 void AudioPluginAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/releaseResources", "info", "Uvolňování zdrojů");
+    #endif
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
   #if JucePlugin_IsMidiEffect
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "debug", "Podpora layoutu pro MIDI efekt: true");
+    #endif
     juce::ignoreUnused (layouts);
     return true;
   #else
-    // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
-    // Some plugin hosts, such as certain GarageBand versions, will only
-    // load plugins that support stereo bus layouts.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
      && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+    {
+        #if LOGGING_ENABLED
+        Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "warn", "Nepodporovaný layout");
+        #endif
         return false;
+    }
 
-    // This checks if the input layout matches the output layout
    #if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
+    {
+        #if LOGGING_ENABLED
+        Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "warn", "Input a output layout se neshodují");
+        #endif
         return false;
+    }
    #endif
 
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/isBusesLayoutSupported", "debug", "Podpora layoutu: true");
+    #endif
     return true;
   #endif
 }
@@ -124,64 +223,60 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layou
 void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                               juce::MidiBuffer& midiMessages)
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "debug", "Zpracování bloku: samples=" + juce::String(buffer.getNumSamples()));
+    #endif
     juce::ignoreUnused (midiMessages);
 
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
         auto* channelData = buffer.getWritePointer (channel);
         juce::ignoreUnused (channelData);
-        // ..do something to the data...
     }
 }
 
 //==============================================================================
 bool AudioPluginAudioProcessor::hasEditor() const
 {
-    return true; // (change this to false if you choose to not supply an editor)
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/hasEditor", "debug", "Má editor: true");
+    #endif
+    return true;
 }
 
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/createEditor", "info", "Vytváření editoru");
+    #endif
     return new AudioPluginAudioProcessorEditor (*this);
 }
 
 //==============================================================================
 void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/getStateInformation", "info", "Získávání stavu");
+    #endif
     juce::ignoreUnused (destData);
 }
 
 void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+    #if LOGGING_ENABLED
+    Logger::getInstance().log("AudioPluginAudioProcessor/setStateInformation", "info", "Nastavování stavu: velikost=" + juce::String(sizeInBytes));
+    #endif
     juce::ignoreUnused (data, sizeInBytes);
 }
 
 //==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
 
 //==============================================================================
 class AudioPluginAudioProcessorEditor final : public juce::AudioProcessorEditor
@@ -13,10 +14,16 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    // Metoda pro aktualizaci log display
+    void updateLogDisplay();
+
 private:
-    // This reference is provided as a quick way for your editor to
-    // access the processor object that created it.
+    // Reference na procesor
     AudioPluginAudioProcessor& processorRef;
+
+    // Komponenty pro logování
+    std::unique_ptr<juce::TextEditor> logDisplay;
+    std::unique_ptr<juce::ToggleButton> toggleLogging;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };

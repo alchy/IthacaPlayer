@@ -69,6 +69,8 @@ juce_generate_juce_header(IthacaPlayer)
 
 target_sources(IthacaPlayer
     PRIVATE
+        Logger.h
+        Logger.cpp
         PluginEditor.cpp
         PluginProcessor.cpp)
 
