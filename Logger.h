@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <array>
+#include <memory>
 
 #define MAX_LOG_ENTRIES 100
 
@@ -44,10 +45,13 @@ private:
     mutable std::mutex logMutex_;
     mutable std::mutex editorMutex_;
 
-    // 🔧 oprava: už jen raw pointer (JUCE spravuje lifecycle editoru)
+    // Oprava: Použit unique_ptr místo deprecated ScopedPointer
     AudioPluginAudioProcessorEditor* editorPtr_{nullptr};
 
     void pushToLogQueue(const juce::String& logEntry);
     juce::StringArray getCurrentLogs() const;
     void scheduleGUIUpdate();
+
+    // Oprava: Použit unique_ptr místo deprecated ScopedPointer
+    std::unique_ptr<juce::FileLogger> fileLogger_;
 };

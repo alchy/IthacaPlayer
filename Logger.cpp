@@ -4,14 +4,36 @@
 
 std::atomic<bool> Logger::loggingEnabled{true};
 
-Logger::Logger() {}
+/**
+ * @brief Konstruktor Logger.
+ * Inicializuje singleton a přidává file logger.
+ * Oprava: Použit unique_ptr místo deprecated ScopedPointer.
+ */
+Logger::Logger() {
+    // Oprava: Inicializace file loggeru (umístění v default app log složce)
+    fileLogger_ = std::unique_ptr<juce::FileLogger>(
+        juce::FileLogger::createDefaultAppLogger("IthacaPlayer", "IthacaPlayer.log", "Start IthacaPlayer logu", 0)
+    );
+    DBG("Logger initialized.");  // Přidaný debug pro konzoli
+}
 
+/**
+ * @brief Vrátí singleton instanci Logger.
+ * @return Reference na instanci
+ */
 Logger& Logger::getInstance()
 {
     static Logger instance;
     return instance;
 }
 
+/**
+ * @brief Loguje zprávu s časovým razítkem, komponentou a závažností.
+ * @param component Komponenta (např. třída/metoda)
+ * @param severity Závažnost (info, debug, error, warn)
+ * @param message Zpráva
+ * Oprava: Přidán zápis do fileLogger, pokud existuje.
+ */
 void Logger::log(const juce::String& component, const juce::String& severity, const juce::String& message)
 {
     if (!loggingEnabled.load(std::memory_order_relaxed))
@@ -24,8 +46,14 @@ void Logger::log(const juce::String& component, const juce::String& severity, co
 
         pushToLogQueue(logEntry);
         scheduleGUIUpdate();
+
+        // Oprava: Zápis do souboru, pokud fileLogger existuje
+        if (fileLogger_ != nullptr) {
+            fileLogger_->logMessage(logEntry);
+        }
     } catch (...) {
-        // bezpečný fallback
+        // Bezpečný fallback při chybě
+        DBG("Logger error in log method.");  // Přidaný debug pro chyby
     }
 }
 
@@ -56,6 +84,7 @@ void Logger::setEditor(AudioPluginAudioProcessorEditor* ed)
 {
     std::lock_guard<std::mutex> lock(editorMutex_);
     editorPtr_ = ed;
+    DBG("Editor set in Logger.");  // Přidaný debug pro nastavení editoru
 }
 
 void Logger::scheduleGUIUpdate()
@@ -97,6 +126,7 @@ void Logger::clearLogs()
     for (auto& log : logQueue_.logs) {
         log = juce::String();
     }
+    DBG("Logs cleared.");  // Přidaný debug pro čištění logů
 }
 
 size_t Logger::getLogCount() const

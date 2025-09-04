@@ -6,6 +6,7 @@
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
+    DBG("Editor constructor started...");  // Přidaný debug pro konzoli
     juce::ignoreUnused (processorRef);
     
     // Logování vytváření editoru
@@ -77,11 +78,13 @@ AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
     Logger::getInstance().setEditor(nullptr);
     Logger::getInstance().log("PluginEditor/destructor", "info", "Reference na editor odstranena");
     Logger::getInstance().log("PluginEditor/destructor", "info", "=== GUI UZAVRENO ===");
+    DBG("Editor destructor called.");  // Přidaný debug pro konzoli
 }
 
 //==============================================================================
 void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
 {
+    DBG("Painting editor...");  // Přidaný debug pro vykreslení
     // Logování pouze při prvním vykreslení
     static bool firstPaint = true;
     if (firstPaint)
@@ -114,6 +117,7 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
 
 void AudioPluginAudioProcessorEditor::resized()
 {
+    DBG("Resizing editor...");  // Přidaný debug pro změnu velikosti
     // Logování změny velikosti
     Logger::getInstance().log("PluginEditor/resized", "debug", "Zmena velikosti GUI: " + 
         juce::String(getWidth()) + "x" + juce::String(getHeight()));
@@ -143,6 +147,7 @@ void AudioPluginAudioProcessorEditor::resized()
  */
 void AudioPluginAudioProcessorEditor::updateLogDisplay()
 {
+    DBG("Updating log display...");  // Přidaný debug pro aktualizaci display
     // Získání bufferu z Loggeru přes getter
     const juce::StringArray& buffer = Logger::getInstance().getLogBuffer();
 

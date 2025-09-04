@@ -54,12 +54,13 @@ void SampleLibrary::clear()
 
 /*
  * generateSampleForNote
- *  - vygeneruje sinusovku délky SAMPLE_SECONDS pro danou notu
- *  - vrátí true pokud uspěje
+ *  - Vygeneruje sinusovku délky SAMPLE_SECONDS pro danou notu.
+ *  - Vrací true pokud uspěje.
+ *  - Nově: Přidány debug logy kolem alokace pro lepší sledování paměti (každá nota zvlášť).
  */
 bool SampleLibrary::generateSampleForNote(uint8_t note)
 {
-    // lokální kalkulace bez držení locku po dobu generování (alokačně-intenzivní)
+    // Lokální kalkulace bez držení locku po dobu generování (alokačně-intenzivní)
     double freq = getFrequencyForNote(note);
     uint32_t sampleLength = static_cast<uint32_t>(sampleRate_ * SAMPLE_SECONDS);
 
@@ -69,9 +70,18 @@ bool SampleLibrary::generateSampleForNote(uint8_t note)
         return false;
     }
 
+    // Debug log před alokací (pro sledování malloc-like)
+    size_t allocSize = static_cast<size_t>(sampleLength) * sizeof(float);
+    logger_.log("SampleLibrary/generateSampleForNote", "debug",
+                "Začínám alokaci pro notu " + juce::String((int)note) +
+                ", velikost: " + juce::String(allocSize) + " bajtů");
+
     std::unique_ptr<float[]> tmpData;
     try {
         tmpData = std::make_unique<float[]>(sampleLength);
+        // Debug log po úspěšné alokaci
+        logger_.log("SampleLibrary/generateSampleForNote", "debug",
+                    "Alokace úspěšná pro notu " + juce::String((int)note));
     } catch (const std::bad_alloc&) {
         logger_.log("SampleLibrary/generateSampleForNote", "error",
                     "Allocation failed for note " + juce::String((int)note));
@@ -83,11 +93,11 @@ bool SampleLibrary::generateSampleForNote(uint8_t note)
 
     for (uint32_t i = 0; i < sampleLength; ++i) {
         double phase = phaseInc * static_cast<double>(i);
-        // explicit cast -> potlačí warning C4244
+        // Explicit cast -> potlačí warning C4244
         tmpData[i] = SAMPLE_AMPLITUDE * static_cast<float>(std::sin(phase));
     }
 
-    // commit: uložení do interní struktury pod lockem (atomic-ish)
+    // Commit: Uložení do interní struktury pod lockem (atomic-ish)
     {
         std::lock_guard<std::mutex> lock(accessMutex_);
         SampleSegment& seg = sampleSegments_[note];
