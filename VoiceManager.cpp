@@ -1,5 +1,10 @@
 #include "VoiceManager.h"
 
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4244) // Conversion warnings pro MIDI values
+#endif
+
 // SynthVoice implementace
 SynthVoice::SynthVoice(int voiceNumber)
     : voiceNumber_(voiceNumber)
@@ -268,3 +273,7 @@ void VoiceManager::mixleQueue(int queueNumber)
     
     logger_.log("VoiceManager/mixleQueue", "debug", "Queue reorganizovana pro pozici " + juce::String(queueNumber));
 }
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif

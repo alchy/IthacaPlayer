@@ -1,6 +1,11 @@
 #include "SampleLibrary.h"
 #include <cmath>
 
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4244) // Conversion warnings pro MIDI values
+#endif
+
 SampleLibrary::SampleLibrary(double sampleRate)
     : sampleRate_(sampleRate)
     , maxSampleLength_(0)
@@ -165,3 +170,7 @@ void SampleLibrary::fillSineWaveData(float* buffer, uint32_t length, float frequ
     logger_.log("SampleLibrary/fillSineWaveData", "debug", "Sine wave data vygenerovana: " + 
                 juce::String(length) + " samples, frekvence " + juce::String(frequency, 2) + " Hz");
 }
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif

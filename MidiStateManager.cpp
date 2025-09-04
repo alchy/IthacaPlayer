@@ -1,5 +1,10 @@
 #include "MidiStateManager.h"
 
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4244) // Conversion warnings pro MIDI values
+#endif
+
 MidiStateManager::MidiStateManager()
     : pitchWheel_(0)
     , logger_(Logger::getInstance())
@@ -236,3 +241,7 @@ uint8_t MidiStateManager::popFromQueue(NoteQueue& queue)
     }
     return 0xff; // Queue je prázdná
 }
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
