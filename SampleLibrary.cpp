@@ -1,147 +1,323 @@
 #include "SampleLibrary.h"
 #include <cmath>
 
+/**
+ * @brief Konstruktor SampleLibrary
+ */
 SampleLibrary::SampleLibrary()
     : logger_(Logger::getInstance())
 {
-    // nic dál v konstruktoru - actual allocation happens in initialize()
+    logger_.log("SampleLibrary/constructor", "info", "SampleLibrary inicializována s dynamic levels");
 }
 
-/*
- * initialize
- *  - uloží sampleRate a vygeneruje všechno (MIN_NOTE..MAX_NOTE)
- *  - pokud generování nějaké noty selže, loguje a pokračuje (nepřeruší ostatní)
- *  - OPRAVA: Odebrán lock mutexu, protože inicializace je single-threaded (z prepareToPlay),
- *    což zabraňuje deadlocku při rekurzivním zamykání v generateSampleForNote.
+/**
+ * @brief Inicializuje sample library s hybridním loading systémem
  */
-void SampleLibrary::initialize(double sampleRate)
+void SampleLibrary::initialize(double sampleRate, 
+                              std::function<void(int, int, const juce::String&)> progressCallback)
 {
     if (sampleRate <= 0.0) {
         logger_.log("SampleLibrary/initialize", "error", "Invalid sampleRate: " + juce::String(sampleRate));
         throw std::invalid_argument("Invalid sampleRate");
     }
 
+    auto startTime = juce::Time::getMillisecondCounterHiRes();
+    
     sampleRate_ = sampleRate;
     clear();
 
     logger_.log("SampleLibrary/initialize", "info",
-                "Inicializace sample library se sampleRate=" + juce::String(sampleRate_));
+                "Začátek inicializace se sample rate=" + juce::String(sampleRate_) + 
+                " s dynamic levels");
 
-    int success = 0;
-    int fail = 0;
-    for (uint8_t n = MIN_NOTE; n <= MAX_NOTE; ++n) {
-        if (generateSampleForNote(n)) ++success;
-        else ++fail;
+    // Reset statistik
+    loadingStats_ = SampleLibraryStats();
+
+    try {
+        // Vytvoření SampleLoader
+        SampleLoader loader(sampleRate);
+        juce::File instrumentDir = SampleLoader::getDefaultInstrumentDirectory();
+        
+        // Ujištění, že directory existuje
+        if (!instrumentDir.exists()) {
+            if (!instrumentDir.createDirectory()) {
+                throw std::runtime_error("Nelze vytvořit instrument directory: " + 
+                                       instrumentDir.getFullPathName().toStdString());
+            }
+            logger_.log("SampleLibrary/initialize", "info", 
+                       "Vytvořen instrument directory: " + instrumentDir.getFullPathName());
+        }
+
+        // Progress callback wrapper
+        auto progressWrapper = [this, progressCallback](int current, int total, const juce::String& status) {
+            if (progressCallback) {
+                progressCallback(current, total, status);
+            }
+            // Logování každého 50. sample pro snížení noise
+            if (current % 50 == 0 || current == total) {
+                logger_.log("SampleLibrary/initialize", "debug", 
+                           "Progress: " + juce::String(current) + "/" + juce::String(total) + 
+                           " - " + status);
+            }
+        };
+
+        // Načtení všech samples
+        std::vector<LoadedSample> loadedSamples = loader.loadInstrument(instrumentDir, progressWrapper);
+        
+        // Uložení samples do interní struktury
+        for (const auto& sample : loadedSamples) {
+            try {
+                storeSample(sample);
+                loadingStats_.totalSamples++;
+                
+                if (sample.isGenerated) {
+                    loadingStats_.generatedSines++;
+                } else {
+                    loadingStats_.loadedFromFiles++;
+                }
+                
+            } catch (const std::exception& e) {
+                logger_.log("SampleLibrary/initialize", "error",
+                           "Chyba při ukládání sample noty " + juce::String((int)sample.midiNote) + 
+                           " level " + juce::String((int)sample.dynamicLevel) + 
+                           ": " + juce::String(e.what()));
+            }
+        }
+        
+        // Převzetí statistik z SampleLoader
+        const auto& loaderStats = loader.getLoadingStats();
+        loadingStats_.savedToFiles = loaderStats.filesSaved;
+        loadingStats_.totalMemoryUsed = getTotalMemoryUsage();
+        loadingStats_.loadingTimeSeconds = (juce::Time::getMillisecondCounterHiRes() - startTime) / 1000.0;
+
+        logger_.log("SampleLibrary/initialize", "info",
+                   "Inicializace dokončena: " + loadingStats_.getDescription());
+        
+        // Kontrola, zda máme nějaké samples
+        if (loadingStats_.totalSamples == 0) {
+            throw std::runtime_error("Žádné samples nebyly načteny!");
+        }
+        
+        // Kontrola dostupnosti základních not pro debugging
+        AvailabilityInfo availInfo = getAvailabilityInfo();
+        logger_.log("SampleLibrary/initialize", "info",
+                   "Dostupné noty: " + juce::String(availInfo.notesWithAnyLevel) + "/" + 
+                   juce::String(MAX_NOTE - MIN_NOTE + 1) + 
+                   " (mono: " + juce::String(availInfo.monoSamples) + 
+                   ", stereo: " + juce::String(availInfo.stereoSamples) + ")");
+        
+        // Log dynamic level distribution
+        juce::String levelDistribution = "Dynamic levels: ";
+        for (int i = 0; i < NUM_DYNAMIC_LEVELS; ++i) {
+            levelDistribution += "L" + juce::String(i) + ":" + juce::String(availInfo.levelCounts[i]) + " ";
+        }
+        logger_.log("SampleLibrary/initialize", "info", levelDistribution);
+        
+    } catch (const std::exception& e) {
+        logger_.log("SampleLibrary/initialize", "error",
+                   "Fatální chyba při inicializaci: " + juce::String(e.what()));
+        throw;
+    } catch (...) {
+        logger_.log("SampleLibrary/initialize", "error",
+                   "Neznámá fatální chyba při inicializaci");
+        throw std::runtime_error("Unknown error during initialization");
     }
-
-    logger_.log("SampleLibrary/initialize", "info",
-                "Generování samplů dokončeno. Success: " + juce::String(success) +
-                " Fail: " + juce::String(fail));
 }
 
-
-/*
- * clear - vymaže interní data
+/**
+ * @brief Vyčistí všechny samples
  */
 void SampleLibrary::clear()
 {
     std::lock_guard<std::mutex> lock(accessMutex_);
-    for (auto& seg : sampleSegments_)
-        seg.reset();
+    
+    logger_.log("SampleLibrary/clear", "info", "Začátek čištění SampleLibrary");
+    
+    size_t totalFreed = 0;
+    int segmentsCleared = 0;
+    
+    for (auto& segment : sampleSegments_) {
+        if (segment.midiNote != 0) { // Segment má nějaká data
+            totalFreed += segment.getMemoryUsage();
+            segment.reset();
+            segmentsCleared++;
+        }
+    }
 
-    logger_.log("SampleLibrary/clear", "debug", "SampleLibrary cleared");
+    // Reset statistik
+    loadingStats_ = SampleLibraryStats();
+
+    logger_.log("SampleLibrary/clear", "info", 
+               "SampleLibrary vyčištěna - uvolněno " + juce::String(segmentsCleared) + 
+               " segmentů, " + juce::String(totalFreed / (1024*1024)) + "MB");
 }
 
-/*
- * generateSampleForNote
- *  - Vygeneruje sinusovku délky SAMPLE_SECONDS pro danou notu.
- *  - Vrací true pokud uspěje.
- *  - Nově: Přidány debug logy kolem alokace pro lepší sledování paměti (každá nota zvlášť).
+/**
+ * @brief Vrátí sample data pro konkrétní notu a dynamic level
  */
-bool SampleLibrary::generateSampleForNote(uint8_t note)
+const float* SampleLibrary::getSampleData(uint8_t midiNote, uint8_t dynamicLevel) const
 {
-    // Lokální kalkulace bez držení locku po dobu generování (alokačně-intenzivní)
-    double freq = getFrequencyForNote(note);
-    uint32_t sampleLength = static_cast<uint32_t>(sampleRate_ * SAMPLE_SECONDS);
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return nullptr;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].getLayerData(dynamicLevel);
+}
 
-    if (sampleLength < 1) {
-        logger_.log("SampleLibrary/generateSampleForNote", "error",
-                    "Invalid sample length for note " + juce::String((int)note));
+/**
+ * @brief Vrátí délku sample pro konkrétní notu a dynamic level
+ */
+uint32_t SampleLibrary::getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].getLayerLength(dynamicLevel);
+}
+
+/**
+ * @brief Zkontroluje dostupnost konkrétního dynamic levelu
+ */
+bool SampleLibrary::isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
         return false;
     }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].isLayerAvailable(dynamicLevel);
+}
 
-    // Debug log před alokací (pro sledování malloc-like)
-    size_t allocSize = static_cast<size_t>(sampleLength) * sizeof(float);
-    logger_.log("SampleLibrary/generateSampleForNote", "debug",
-                "Začínám alokaci pro notu " + juce::String((int)note) +
-                ", velikost: " + juce::String(allocSize) + " bajtů");
-
-    std::unique_ptr<float[]> tmpData;
-    try {
-        tmpData = std::make_unique<float[]>(sampleLength);
-        // Debug log po úspěšné alokaci
-        logger_.log("SampleLibrary/generateSampleForNote", "debug",
-                    "Alokace úspěšná pro notu " + juce::String((int)note));
-    } catch (const std::bad_alloc&) {
-        logger_.log("SampleLibrary/generateSampleForNote", "error",
-                    "Allocation failed for note " + juce::String((int)note));
+/**
+ * @brief Zkontroluje zda je sample stereo
+ */
+bool SampleLibrary::isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
         return false;
     }
-
-    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
-    const double phaseInc = twoPi * freq / sampleRate_;
-
-    for (uint32_t i = 0; i < sampleLength; ++i) {
-        double phase = phaseInc * static_cast<double>(i);
-        // Explicit cast -> potlačí warning C4244
-        tmpData[i] = SAMPLE_AMPLITUDE * static_cast<float>(std::sin(phase));
-    }
-
-    // Commit: Uložení do interní struktury pod lockem (atomic-ish)
-    {
-        std::lock_guard<std::mutex> lock(accessMutex_);
-        SampleSegment& seg = sampleSegments_[note];
-        seg.sampleData = std::move(tmpData);
-        seg.lengthSamples = sampleLength;
-        seg.midiNote = note;
-        seg.isAllocated = true;
-    }
-
-    logger_.log("SampleLibrary/generateSampleForNote", "debug",
-                "Vzorek vygenerován pro notu " + juce::String((int)note) +
-                " freq=" + juce::String(freq, 2) +
-                " samples=" + juce::String(sampleLength));
-    return true;
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].isLayerStereo(dynamicLevel);
 }
 
-/*
- * getSampleData / getSampleLength / isNoteAvailable
- *  - vrací read-only data (chráněné mutexem)
+/**
+ * @brief Uloží načtený sample do interní struktury
  */
-const float* SampleLibrary::getSampleData(uint8_t midiNote) const
+void SampleLibrary::storeSample(const LoadedSample& sample)
 {
+    if (!isValidNote(sample.midiNote) || !isValidDynamicLevel(sample.dynamicLevel)) {
+        throw std::invalid_argument("Invalid MIDI note or dynamic level");
+    }
+    
+    if (!sample.audioData || sample.lengthSamples == 0) {
+        throw std::invalid_argument("Invalid sample data");
+    }
+
     std::lock_guard<std::mutex> lock(accessMutex_);
-    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
-        return sampleSegments_[midiNote].sampleData.get();
-    return nullptr;
+    
+    SampleSegment& segment = sampleSegments_[sample.midiNote];
+    segment.midiNote = sample.midiNote;
+    
+    // Kopírování dat (nutné kvůli unique_ptr)
+    size_t totalSamples = static_cast<size_t>(sample.lengthSamples) * sample.numChannels;
+    auto dataCopy = std::make_unique<float[]>(totalSamples);
+    std::copy(sample.audioData.get(), 
+              sample.audioData.get() + totalSamples, 
+              dataCopy.get());
+    
+    bool isStereo = (sample.numChannels == 2);
+    segment.storeLayer(sample.dynamicLevel, std::move(dataCopy), sample.lengthSamples, isStereo);
+    
+    logger_.log("SampleLibrary/storeSample", "debug",
+               "Uložen sample nota " + juce::String((int)sample.midiNote) + 
+               " level " + juce::String((int)sample.dynamicLevel) + 
+               " (" + juce::String(sample.lengthSamples) + " samples, " +
+               juce::String(isStereo ? "stereo" : "mono") + ", " +
+               juce::String(sample.isGenerated ? "generated" : "loaded") + ")");
 }
 
-uint32_t SampleLibrary::getSampleLength(uint8_t midiNote) const
+/**
+ * @brief Mapuje MIDI velocity na dynamic level
+ */
+uint8_t SampleLibrary::velocityToDynamicLevel(uint8_t velocity)
 {
-    std::lock_guard<std::mutex> lock(accessMutex_);
-    if (midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated)
-        return sampleSegments_[midiNote].lengthSamples;
-    return 0;
+    return SampleLoader::velocityToDynamicLevel(velocity);
 }
 
-bool SampleLibrary::isNoteAvailable(uint8_t midiNote) const
+/**
+ * @brief Vrátí celkovou spotřebu paměti
+ */
+size_t SampleLibrary::getTotalMemoryUsage() const
 {
     std::lock_guard<std::mutex> lock(accessMutex_);
-    return midiNote < sampleSegments_.size() && sampleSegments_[midiNote].isAllocated;
+    
+    size_t total = 0;
+    for (const auto& segment : sampleSegments_) {
+        total += segment.getMemoryUsage();
+    }
+    
+    return total;
 }
 
-double SampleLibrary::getFrequencyForNote(uint8_t midiNote) const
+/**
+ * @brief Vrátí počet dostupných not
+ */
+int SampleLibrary::getAvailableNoteCount() const
 {
-    // standardní formule A4=440Hz (MIDI 69)
-    return 440.0 * std::pow(2.0, (static_cast<int>(midiNote) - 69) / 12.0);
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    int count = 0;
+    for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
+        // Počítáme notu jako dostupnou pokud má alespoň jeden dynamic level
+        bool hasAnyLevel = false;
+        for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
+            if (sampleSegments_[note].isLayerAvailable(level)) {
+                hasAnyLevel = true;
+                break;
+            }
+        }
+        if (hasAnyLevel) {
+            count++;
+        }
+    }
+    
+    return count;
+}
+
+/**
+ * @brief Vrátí detailní informace o dostupných dynamic levels
+ */
+SampleLibrary::AvailabilityInfo SampleLibrary::getAvailabilityInfo() const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    AvailabilityInfo info;
+    info.totalNotes = MAX_NOTE - MIN_NOTE + 1;
+    
+    for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
+        bool hasAnyLevel = false;
+        
+        for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
+            if (sampleSegments_[note].isLayerAvailable(level)) {
+                hasAnyLevel = true;
+                info.levelCounts[level]++;
+                
+                if (sampleSegments_[note].isLayerStereo(level)) {
+                    info.stereoSamples++;
+                } else {
+                    info.monoSamples++;
+                }
+            }
+        }
+        
+        if (hasAnyLevel) {
+            info.notesWithAnyLevel++;
+        }
+    }
+    
+    return info;
 }

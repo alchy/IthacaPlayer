@@ -7,7 +7,24 @@
 
 ## Cesta na aplikacni data
 
+WIN+R: %APPDATA%\IthacaPlayer
+
 C:\Users\nemej992\AppData\Roaming\IthacaPlayer
+
+## MIDI tools
+
+### WMPK
+
+VMPK is a free software that generates and receives MIDI events. You can use the computer's keyboard or mouse to play notes, and connect VMPK to other MIDI instruments or devices.
+
+https://vmpk.sourceforge.io/#Download
+https://sourceforge.net/projects/vmpk/
+
+### loopMIDI
+
+This software can be used to create virtual loopback MIDI-ports to interconnect applications on Windows that want to open hardware-MIDI-ports for communication.
+
+https://www.tobias-erichsen.de/software/loopmidi.html
 
 ## Nastavení vývojového prostředí
 

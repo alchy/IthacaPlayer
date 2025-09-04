@@ -168,23 +168,31 @@ void AudioPluginAudioProcessor::initializeSynth()
         }
         
         logger_.log("PluginProcessor/initializeSynth", "info", "Inicializace sample library...");
-        sampleLibrary_.initialize(sampleRate_);
+        
+        // Progress callback pro sledování loading
+        auto progressCallback = [this](int current, int total, const juce::String& status) {
+            if (current % 100 == 0 || current == total) { // Log každých 100 samples
+                logger_.log("PluginProcessor/initializeSynth", "info",
+                           "Loading progress: " + juce::String(current) + "/" + juce::String(total) + 
+                           " - " + status);
+            }
+        };
+        
+        sampleLibrary_.initialize(sampleRate_, progressCallback);
         
         // Kontrola, zda byla inicializace úspěšná
-        bool hasValidSamples = false;
-        for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
-            if (sampleLibrary_.isNoteAvailable(note)) {
-                hasValidSamples = true;
-                break;
-            }
-        }
-        
-        if (!hasValidSamples) {
+        int availableNotes = sampleLibrary_.getAvailableNoteCount();
+        if (availableNotes == 0) {
             throw std::runtime_error("Žádné vzorky nebyly vygenerovány");
         }
         
+        // Výpis loading statistik
+        const auto& stats = sampleLibrary_.getLoadingStats();
+        logger_.log("PluginProcessor/initializeSynth", "info", 
+                   "Sample library inicializována: " + stats.getDescription());
+        
         synthState_.store(SynthState::Ready);
-        logger_.log("PluginProcessor/initializeSynth", "info", "Syntezátор úspěšně inicializován");
+        logger_.log("PluginProcessor/initializeSynth", "info", "Syntezátor úspěšně inicializován");
         
     } catch (const std::exception& e) {
         handleSynthError("Inicializace selhala: " + juce::String(e.what()));
@@ -239,7 +247,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     static int blockCounter = 0;
     blockCounter++;
     
-    // Periodicr logging každých 1000 bloků pro snížení zátěže
+    // Periodické logging každých 1000 bloků pro snížení zátěže
     bool shouldLog = (blockCounter % 1000 == 1) || (blockCounter <= 10);
     
     try {
@@ -274,7 +282,10 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                 midiEventCount++;
                 
                 if (msg.isNoteOn()) {
-                    midiState_.pushNoteOn(msg.getChannel() - 1, msg.getNoteNumber(), msg.getVelocity());
+                    // OPRAVA: Explicitní cast pro odstranění warning C4244
+                    midiState_.pushNoteOn(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                         static_cast<uint8_t>(msg.getNoteNumber()), 
+                                         static_cast<uint8_t>(msg.getVelocity()));
                     if (shouldLog) {
                         logger_.log("PluginProcessor/processBlock", "debug", 
                                    "NoteOn: nota " + juce::String(msg.getNoteNumber()) + 
@@ -282,14 +293,19 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                                    ", kanál " + juce::String(msg.getChannel()));
                     }
                 } else if (msg.isNoteOff()) {
-                    midiState_.pushNoteOff(msg.getChannel() - 1, msg.getNoteNumber());
+                    // OPRAVA: Explicitní cast pro odstranění warning C4244
+                    midiState_.pushNoteOff(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                          static_cast<uint8_t>(msg.getNoteNumber()));
                     if (shouldLog) {
                         logger_.log("PluginProcessor/processBlock", "debug", 
                                    "NoteOff: nota " + juce::String(msg.getNoteNumber()) + 
                                    ", kanál " + juce::String(msg.getChannel()));
                     }
                 } else if (msg.isController()) {
-                    midiState_.setControllerValue(msg.getChannel() - 1, msg.getControllerNumber(), msg.getControllerValue());
+                    // OPRAVA: Explicitní cast pro odstranění warning C4244
+                    midiState_.setControllerValue(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                                 static_cast<uint8_t>(msg.getControllerNumber()), 
+                                                 static_cast<uint8_t>(msg.getControllerValue()));
                     if (shouldLog) {
                         logger_.log("PluginProcessor/processBlock", "debug", 
                                    "Controller: #" + juce::String(msg.getControllerNumber()) + 
@@ -318,6 +334,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         // Generace audio s bezpečnostními kontrolami
         buffer.clear();
         
+        // OPRAVA: Získání float* pointeru z AudioBuffer
         float* channelData = buffer.getWritePointer(0);
         if (channelData == nullptr) {
             logger_.log("PluginProcessor/processBlock", "error", "Null pointer pro audio buffer kanál 0");
@@ -325,6 +342,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         }
         
         try {
+            // OPRAVA: Předání float* místo AudioBuffer
             voiceManager_.generateAudio(channelData, buffer.getNumSamples());
         } catch (const std::exception& e) {
             logger_.log("PluginProcessor/processBlock", "error", "Chyba při generaci audio: " + juce::String(e.what()));
@@ -344,6 +362,9 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                 // Necháme mono, není to kritická chyba
             }
         }
+
+        // Refresh voice manageru
+        voiceManager_.refresh();
 
         if (shouldLog) {
             int activeVoices = voiceManager_.getActiveVoiceCount();
@@ -367,7 +388,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
  */
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
-    logger_.log("PluginProcessor/createEditor", "info", "=== VYTVÁŘENÍ EDITORU ===");
+    logger_.log("PluginProcessor/createEditor", "info", "=== VYTVOŘENÍ EDITORU ===");
     
     try {
         auto* editor = new AudioPluginAudioProcessorEditor(*this);

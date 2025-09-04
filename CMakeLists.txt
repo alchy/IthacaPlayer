@@ -19,14 +19,23 @@ juce_generate_juce_header(IthacaPlayer)
 
 target_sources(IthacaPlayer
     PRIVATE
+        # Core system
         Logger.h
         Logger.cpp
+        
+        # Enhanced sample management with dynamic levels
+        SampleLoader.h
+        SampleLoader.cpp
         SampleLibrary.h
         SampleLibrary.cpp
+        
+        # MIDI and voice management
         MidiStateManager.h
         MidiStateManager.cpp
         VoiceManager.h
         VoiceManager.cpp
+        
+        # JUCE plugin interface
         PluginEditor.h
         PluginEditor.cpp
         PluginProcessor.h
@@ -41,6 +50,7 @@ target_compile_definitions(IthacaPlayer
 target_link_libraries(IthacaPlayer
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_audio_formats  # Přidáno pro WAV loading
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

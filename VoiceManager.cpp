@@ -2,8 +2,7 @@
 #include "Logger.h"
 
 /**
- * @brief Konstruktor SynthVoice.
- * Inicializuje logger a resetuje stav.
+ * @brief Konstruktor SynthVoice
  */
 SynthVoice::SynthVoice()
     : logger_(Logger::getInstance())
@@ -12,10 +11,7 @@ SynthVoice::SynthVoice()
 }
 
 /**
- * @brief Spustí hlas s kontrolou dostupnosti vzorku.
- * @param midiNote MIDI nota
- * @param velocity Velocity
- * @param library SampleLibrary pro data
+ * @brief Spustí hlas s automatickým výběrem dynamic levelu
  */
 void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library)
 {
@@ -24,17 +20,30 @@ void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& 
     midiNote_ = midiNote;
     velocity_ = velocity;
 
-    if (!library.isNoteAvailable(midiNote)) {
-        logger_.log("SynthVoice/start", "error", "Požadovaná nota není dostupná: " + juce::String((int)midiNote));
+    // Mapování velocity na dynamic level
+    uint8_t preferredLevel = library.velocityToDynamicLevel(velocity);
+    
+    // Najdeme nejlepší dostupný level
+    uint8_t bestLevel = findBestAvailableLevel(library, midiNote, preferredLevel);
+    
+    if (bestLevel == 255) {
+        logger_.log("SynthVoice/start", "error", 
+                   "Žádný dostupný dynamic level pro notu " + juce::String((int)midiNote));
         isActive_ = false;
         return;
     }
 
-    sampleData_ = library.getSampleData(midiNote);
-    sampleLength_ = library.getSampleLength(midiNote);
+    currentDynamicLevel_ = bestLevel;
+    sampleData_ = library.getSampleData(midiNote, currentDynamicLevel_);
+    currentSampleLength_ = library.getSampleLength(midiNote, currentDynamicLevel_);
+    
+    // Zjistíme zda je sample stereo
+    currentSampleIsStereo_ = library.isSampleStereo(midiNote, currentDynamicLevel_);
 
-    if (!sampleData_ || sampleLength_ == 0) {
-        logger_.log("SynthVoice/start", "error", "Neplatný vzorek pro notu " + juce::String((int)midiNote));
+    if (!sampleData_ || currentSampleLength_ == 0) {
+        logger_.log("SynthVoice/start", "error", 
+                   "Neplatný sample pro notu " + juce::String((int)midiNote) + 
+                   " level " + juce::String((int)currentDynamicLevel_));
         isActive_ = false;
         return;
     }
@@ -42,55 +51,133 @@ void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& 
     position_ = 0;
     isActive_ = true;
 
-    logger_.log("SynthVoice/start", "debug", "Spuštěna nota " + juce::String((int)midiNote) +
-                                             " délka=" + juce::String(sampleLength_));
+    logger_.log("SynthVoice/start", "debug", 
+               "Spuštěna nota " + juce::String((int)midiNote) + 
+               " velocity=" + juce::String((int)velocity) +
+               " level=" + juce::String((int)currentDynamicLevel_) +
+               " délka=" + juce::String(currentSampleLength_) +
+               " stereo=" + juce::String(currentSampleIsStereo_ ? "ano" : "ne"));
 }
 
 void SynthVoice::stop()
 {
-    isActive_ = false;  // Okamžité zastavení (může být rozšířeno o release fázi)
+    isActive_ = false;
+    logger_.log("SynthVoice/stop", "debug", 
+               "Zastaven voice nota " + juce::String((int)midiNote_));
 }
 
 void SynthVoice::reset()
 {
     midiNote_ = 0;
     velocity_ = 0;
+    currentDynamicLevel_ = 0;
     isActive_ = false;
     sampleData_ = nullptr;
-    sampleLength_ = 0;
+    currentSampleLength_ = 0;
     position_ = 0;
-    queue_ = 0;  // Reset queue na dno
+    queue_ = 0;
+    currentSampleIsStereo_ = false;
 }
 
 /**
- * @brief Renderuje audio s gainem podle velocity.
- * @param outputBuffer Buffer pro přičtení
- * @param numSamples Počet samplů
+ * @brief Renderuje audio bez real-time gain (pre-computed v samples)
  */
-void SynthVoice::render(float* outputBuffer, int numSamples)
+void SynthVoice::render(float* outputBuffer, int numSamples, bool isStereo)
 {
-    if (!isActive_ || sampleData_ == nullptr || sampleLength_ == 0)
+    if (!isActive_ || sampleData_ == nullptr || currentSampleLength_ == 0)
         return;
 
-    const float gain = static_cast<float>(velocity_) / 127.0f;  // Lineární gain z velocity
-
-    for (int i = 0; i < numSamples; ++i) {
-        if (position_ >= sampleLength_) {
-            stop();  // Dohráno -> deaktivace
-            break;
+    if (currentSampleIsStereo_ && isStereo) {
+        // Stereo sample → stereo output
+        for (int i = 0; i < numSamples; ++i) {
+            if (position_ >= currentSampleLength_) {
+                stop();
+                break;
+            }
+            
+            // Interleaved stereo data
+            outputBuffer[i * 2] += sampleData_[position_ * 2];     // Left
+            outputBuffer[i * 2 + 1] += sampleData_[position_ * 2 + 1]; // Right
+            ++position_;
         }
-        outputBuffer[i] += sampleData_[position_] * gain;
-        ++position_;
+    } else if (!currentSampleIsStereo_ && isStereo) {
+        // Mono sample → stereo output (duplicate na oba kanály)
+        for (int i = 0; i < numSamples; ++i) {
+            if (position_ >= currentSampleLength_) {
+                stop();
+                break;
+            }
+            
+            float sample = sampleData_[position_];
+            outputBuffer[i * 2] += sample;     // Left
+            outputBuffer[i * 2 + 1] += sample; // Right
+            ++position_;
+        }
+    } else {
+        // Mono sample → mono output NEBO stereo→mono (mix)
+        for (int i = 0; i < numSamples; ++i) {
+            if (position_ >= currentSampleLength_) {
+                stop();
+                break;
+            }
+            
+            if (currentSampleIsStereo_) {
+                // Stereo sample → mono output (mix L+R)
+                float left = sampleData_[position_ * 2];
+                float right = sampleData_[position_ * 2 + 1];
+                outputBuffer[i] += (left + right) * 0.5f;
+            } else {
+                // Mono sample → mono output
+                outputBuffer[i] += sampleData_[position_];
+            }
+            ++position_;
+        }
     }
+}
+
+/**
+ * @brief Najde nejlepší dostupný dynamic level
+ */
+uint8_t SynthVoice::findBestAvailableLevel(const SampleLibrary& library, uint8_t midiNote, uint8_t preferredLevel)
+{
+    // 1. Zkus preferovaný level
+    if (library.isNoteAvailable(midiNote, preferredLevel)) {
+        return preferredLevel;
+    }
+
+    // 2. Zkus blízké levely (směrem dolů i nahoru)
+    for (int offset = 1; offset < 8; ++offset) {
+        // Zkus nižší level
+        if (preferredLevel >= offset) {
+            // Explicitní cast pro odstranění warning C4244
+            uint8_t lowerLevel = static_cast<uint8_t>(preferredLevel - offset);
+            if (library.isNoteAvailable(midiNote, lowerLevel)) {
+                logger_.log("SynthVoice/findBestAvailableLevel", "debug",
+                           "Fallback na nižší level " + juce::String((int)lowerLevel) + 
+                           " místo " + juce::String((int)preferredLevel));
+                return lowerLevel;
+            }
+        }
+        
+        // Zkus vyšší level
+        // Explicitní cast pro odstranění warning C4244
+        uint8_t higherLevel = static_cast<uint8_t>(preferredLevel + offset);
+        if (higherLevel < 8 && library.isNoteAvailable(midiNote, higherLevel)) {
+            logger_.log("SynthVoice/findBestAvailableLevel", "debug",
+                       "Fallback na vyšší level " + juce::String((int)higherLevel) + 
+                       " místo " + juce::String((int)preferredLevel));
+            return higherLevel;
+        }
+    }
+
+    // 3. Žádný level není dostupný
+    return 255;
 }
 
 // ======================== VoiceManager =========================
 
 /**
- * @brief Konstruktor VoiceManager.
- * Vytvoří voices s výchozí queue=0.
- * @param library SampleLibrary
- * @param numVoices Počet hlasů
+ * @brief Konstruktor VoiceManager
  */
 VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
     : logger_(Logger::getInstance()), sampleLibrary_(library)
@@ -98,26 +185,26 @@ VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
     voices_.reserve(numVoices);
     for (int i = 0; i < numVoices; ++i) {
         voices_.emplace_back(std::make_unique<SynthVoice>());
-        voices_.back()->setQueue(0);  // Výchozí queue na 0 (dno stacku)
+        voices_.back()->setQueue(0);
     }
 
-    logger_.log("VoiceManager/constructor", "info", "VoiceManager vytvořen s " + juce::String(numVoices) + " hlasy");
+    logger_.log("VoiceManager/constructor", "info", 
+               "VoiceManager vytvořen s " + juce::String(numVoices) + " hlasy pro dynamic levels");
 }
 
 /**
- * @brief Zpracuje MIDI události (note-on/off) z queue.
- * @param midiState MidiStateManager
- * Oprava: Upraveno pro uint8_t z popNoteOn/popNoteOff, kontrola if (raw == 255)
+ * @brief Zpracuje MIDI události z MidiStateManager
  */
 void VoiceManager::processMidiEvents(MidiStateManager& midiState)
 {
     // Zpracování NOTE ON
     for (int ch = 0; ch < 16; ++ch) {
         while (true) {
-            uint8_t raw = midiState.popNoteOn(static_cast<uint8_t>(ch));  // Oprava: Explicit cast
+            uint8_t raw = midiState.popNoteOn(static_cast<uint8_t>(ch));
             if (raw == 255) break;
+            
             uint8_t note = raw;
-            uint8_t vel = midiState.getVelocity(static_cast<uint8_t>(ch), note);  // Oprava: Explicit cast
+            uint8_t vel = midiState.getVelocity(static_cast<uint8_t>(ch), note);
             startVoice(note, vel);
         }
     }
@@ -125,8 +212,9 @@ void VoiceManager::processMidiEvents(MidiStateManager& midiState)
     // Zpracování NOTE OFF
     for (int ch = 0; ch < 16; ++ch) {
         while (true) {
-            uint8_t raw = midiState.popNoteOff(static_cast<uint8_t>(ch));  // Oprava: Explicit cast
+            uint8_t raw = midiState.popNoteOff(static_cast<uint8_t>(ch));
             if (raw == 255) break;
+            
             uint8_t note = raw;
             stopVoice(note);
         }
@@ -134,30 +222,45 @@ void VoiceManager::processMidiEvents(MidiStateManager& midiState)
 }
 
 /**
- * @brief Generuje audio mixem hlasů.
- * @param buffer Audio buffer
- * @param numSamples Počet samplů
+ * @brief Generuje audio mixem hlasů s stereo support
  */
 void VoiceManager::generateAudio(float* buffer, int numSamples)
 {
     if (buffer == nullptr || numSamples <= 0) return;
 
+    // Detekujeme zda buffer vypadá jako stereo (heuristika)
+    // V reálné implementaci by to měl být parametr
+    bool isStereoOutput = true; // Předpokládáme stereo output
+    
     // Mix všech aktivních hlasů
     for (auto& v : voices_) {
-        if (v->isActive()) v->render(buffer, numSamples);
+        if (v->isActive()) {
+            v->render(buffer, numSamples, isStereoOutput);
+        }
     }
 }
 
+/**
+ * @brief Housekeeping a statistiky
+ */
 void VoiceManager::refresh()
 {
-    // Může být rozšířeno o statistiky / voice stealing atd. (aktuálně prázdné)
+    ++refreshCounter_;
+    
+    // Reset voice stealing counter
+    voicesStolenSinceLastRefresh_ = 0;
+    
+    // Aktualizace statistik
+    updateStatistics();
+    
+    // Periodické logování
+    if (refreshCounter_ % PERIODIC_LOG_INTERVAL == 0) {
+        logPeriodicStatus();
+    }
 }
 
 /**
- * @brief Spustí hlas s lepším voice stealingem (inspirováno HW syntetizérem).
- * Nejprve hledá existující, pak volnou s max queue, pak ukradne.
- * @param midiNote Nota
- * @param velocity Velocity
+ * @brief Spustí hlas s enhanced voice stealing
  */
 void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
 {
@@ -165,13 +268,13 @@ void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
     for (auto& v : voices_) {
         if (v->isActive() && v->getNote() == midiNote) {
             v->start(midiNote, velocity, sampleLibrary_);
-            mixleQueue(v->getQueue());  // Přeuspořádej queue
-            v->setQueue(static_cast<uint8_t>(voices_.size() - 1));  // Nastav na top
+            mixleQueue(v->getQueue());
+            v->setQueue(static_cast<uint8_t>(voices_.size() - 1));
             return;
         }
     }
 
-    // Hledej volnou voice s nejvyšším queue (nejstarší na top)
+    // Hledej volnou voice s nejvyšším queue
     SynthVoice* candidate = nullptr;
     uint8_t maxQueue = 0;
     for (auto& v : voices_) {
@@ -181,45 +284,71 @@ void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
         }
     }
 
-    // Pokud není volná, ukradni s nejvyšším queue
+    // Pokud není volná, použij voice stealing
     if (!candidate) {
-        for (auto& v : voices_) {
-            if (v->getQueue() >= maxQueue) {
-                candidate = v.get();
-                maxQueue = v->getQueue();
-            }
+        candidate = findVoiceStealingCandidate();
+        if (candidate) {
+            voicesStolenSinceLastRefresh_++;
+            logger_.log("VoiceManager/startVoice", "debug", 
+                       "Voice stealing pro notu " + juce::String((int)midiNote) + 
+                       " (ukradena nota " + juce::String((int)candidate->getNote()) + ")");
         }
-        logger_.log("VoiceManager/startVoice", "warn", "Voice stealing: ukraden voice pro notu " + juce::String((int)midiNote));
     }
 
     if (candidate) {
-        mixleQueue(candidate->getQueue());  // Přeuspořádej
+        mixleQueue(candidate->getQueue());
         candidate->start(midiNote, velocity, sampleLibrary_);
-        candidate->setQueue(static_cast<uint8_t>(voices_.size() - 1));  // Nastav na top
+        candidate->setQueue(static_cast<uint8_t>(voices_.size() - 1));
+    } else {
+        logger_.log("VoiceManager/startVoice", "warn", 
+                   "Nelze najít voice pro notu " + juce::String((int)midiNote));
     }
 }
 
 /**
- * @brief Zastaví hlas a přeuspořádá queue.
- * @param midiNote Nota
+ * @brief Zastaví hlas pro danou notu
  */
 void VoiceManager::stopVoice(uint8_t midiNote)
 {
     for (auto& v : voices_) {
         if (v->isActive() && v->getNote() == midiNote) {
             v->stop();
-            mixleQueue(v->getQueue());  // Přeuspořádej po uvolnění
-            v->setQueue(0);  // Reset na dno
+            mixleQueue(v->getQueue());
+            v->setQueue(0);
             return;
         }
     }
 }
 
 /**
- * @brief Přeuspořádá queue: Posune vybranou na dno, ostatní posune nahoru/dolů.
- * @param queueNumber Číslo queue k mixlování
+ * @brief Enhanced voice stealing algorithm
  */
-void VoiceManager::mixleQueue(uint8_t queueNumber) {
+SynthVoice* VoiceManager::findVoiceStealingCandidate()
+{
+    SynthVoice* candidate = nullptr;
+    uint8_t maxQueue = 0;
+    float maxProgress = 0.0f;
+    
+    // Najdi voice s nejvyšším queue (nejstarší) a nejvyšším progress
+    for (auto& v : voices_) {
+        if (v->isActive()) {
+            if (v->getQueue() > maxQueue || 
+                (v->getQueue() == maxQueue && v->getProgress() > maxProgress)) {
+                candidate = v.get();
+                maxQueue = v->getQueue();
+                maxProgress = v->getProgress();
+            }
+        }
+    }
+    
+    return candidate;
+}
+
+/**
+ * @brief Přeuspořádá queue priorit
+ */
+void VoiceManager::mixleQueue(uint8_t queueNumber) 
+{
     for (auto& v : voices_) {
         if (v->getQueue() == queueNumber) {
             v->setQueue(0);  // Posun na dno
@@ -232,8 +361,7 @@ void VoiceManager::mixleQueue(uint8_t queueNumber) {
 }
 
 /**
- * @brief Vrátí počet aktivních hlasů (pro debug a monitoring).
- * @return Počet aktivních hlasů
+ * @brief Vrátí počet aktivních hlasů
  */
 int VoiceManager::getActiveVoiceCount() const
 {
@@ -242,4 +370,74 @@ int VoiceManager::getActiveVoiceCount() const
         if (voice->isActive()) ++count;
     }
     return count;
+}
+
+/**
+ * @brief Vrátí počet hlasů podle dynamic levelů
+ */
+std::array<int, 8> VoiceManager::getVoiceCountByDynamicLevel() const
+{
+    std::array<int, 8> counts{};
+    
+    for (const auto& voice : voices_) {
+        if (voice->isActive()) {
+            uint8_t level = voice->getDynamicLevel();
+            if (level < 8) {
+                counts[level]++;
+            }
+        }
+    }
+    
+    return counts;
+}
+
+/**
+ * @brief Vrátí detailní statistiky
+ */
+VoiceManager::VoiceStats VoiceManager::getVoiceStats() const
+{
+    return lastStats_;
+}
+
+/**
+ * @brief Aktualizuje statistiky
+ */
+void VoiceManager::updateStatistics() const
+{
+    lastStats_.totalVoices = static_cast<int>(voices_.size());
+    lastStats_.activeVoices = getActiveVoiceCount();
+    lastStats_.inactiveVoices = lastStats_.totalVoices - lastStats_.activeVoices;
+    lastStats_.dynamicLevelCount = getVoiceCountByDynamicLevel();
+    lastStats_.voicesStolenThisRefresh = voicesStolenSinceLastRefresh_;
+    
+    // Průměrný progress
+    float totalProgress = 0.0f;
+    int activeCount = 0;
+    for (const auto& voice : voices_) {
+        if (voice->isActive()) {
+            totalProgress += voice->getProgress();
+            activeCount++;
+        }
+    }
+    lastStats_.averageProgress = (activeCount > 0) ? (totalProgress / activeCount) : 0.0f;
+}
+
+/**
+ * @brief Loguje periodický status
+ */
+void VoiceManager::logPeriodicStatus()
+{
+    const auto& stats = lastStats_;
+    
+    juce::String dynamicLevelInfo;
+    for (int i = 0; i < 8; ++i) {
+        if (stats.dynamicLevelCount[i] > 0) {
+            dynamicLevelInfo += "L" + juce::String(i) + ":" + juce::String(stats.dynamicLevelCount[i]) + " ";
+        }
+    }
+    
+    logger_.log("VoiceManager/periodicStatus", "info",
+               "Voices: " + juce::String(stats.activeVoices) + "/" + juce::String(stats.totalVoices) + 
+               " active, avg progress: " + juce::String(stats.averageProgress * 100.0f, 1) + "%" +
+               " dynamic levels: " + dynamicLevelInfo);
 }

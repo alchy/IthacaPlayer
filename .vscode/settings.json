@@ -3,6 +3,7 @@
         "mutex": "cpp",
         "shared_mutex": "cpp",
         "*.mm": "cpp",
-        "vector": "cpp"
+        "vector": "cpp",
+        "array": "cpp"
     }
 }
