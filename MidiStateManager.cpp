@@ -9,20 +9,20 @@ MidiStateManager::MidiStateManager()
     : pitchWheel_(0)
     , logger_(Logger::getInstance())
 {
-    // Inicializace všech aktivních not
+    // Inicializace všech aktivních not na výchozí hodnoty.
     for (int i = 0; i < MAX_ACTIVE_NOTES; i++) {
         activeNotes_[i] = ActiveNote();
     }
     
-    // Inicializace controller values (výchozí hodnoty podle MIDI standardu)
+    // Inicializace hodnot MIDI controllerů (výchozí podle MIDI standardu).
     for (int channel = 0; channel < 16; channel++) {
         for (int controller = 0; controller < 128; controller++) {
             controllerValues_[channel][controller] = 0;
         }
-        // Výchozí hodnoty pro některé standardní controllery
-        controllerValues_[channel][7] = 100;  // Volume - defaultně 100
-        controllerValues_[channel][10] = 64;  // Pan - defaultně center
-        controllerValues_[channel][64] = 0;   // Sustain pedal - defaultně off
+        // Výchozí hodnoty pro vybrané controllery.
+        controllerValues_[channel][7] = 100;  // Volume
+        controllerValues_[channel][10] = 64;  // Pan (center)
+        controllerValues_[channel][64] = 0;   // Sustain pedal (off)
     }
     
     logger_.log("MidiStateManager/constructor", "info", "MidiStateManager inicializovan");
@@ -40,7 +40,7 @@ void MidiStateManager::putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity)
     logger_.log("MidiStateManager/putNoteOn", "info", "Note ON - Ch:" + juce::String(channel) + 
                 " Key:" + juce::String(key) + " Vel:" + juce::String(velocity));
     
-    // Najdi existující slot pro tuto notu nebo vytvoř nový
+    // Vyhledání existujícího slotu nebo volného slotu pro notu.
     int slot = findNoteSlot(channel, key);
     if (slot == -1) {
         slot = findFreeSlot();
@@ -53,7 +53,7 @@ void MidiStateManager::putNoteOn(uint8_t channel, uint8_t key, uint8_t velocity)
         activeNotes_[slot].isActive = true;
         activeNotes_[slot].triggerTime = juce::Time::getMillisecondCounter();
         
-        // Přidej do note-on queue
+        // Přidání do fronty note-on pro channel.
         pushToQueue(noteOnQueue_[channel], key);
     } else {
         logger_.log("MidiStateManager/putNoteOn", "warn", "Zadny volny slot pro novou notu");
@@ -71,12 +71,12 @@ void MidiStateManager::putNoteOff(uint8_t channel, uint8_t key)
     logger_.log("MidiStateManager/putNoteOff", "info", "Note OFF - Ch:" + juce::String(channel) + 
                 " Key:" + juce::String(key));
     
-    // Najdi slot s touto notou a označ ji jako neaktivní
+    // Vyhledání slotu a označení noty jako neaktivní.
     int slot = findNoteSlot(channel, key);
     if (slot != -1) {
         activeNotes_[slot].isActive = false;
         
-        // Přidej do note-off queue
+        // Přidání do fronty note-off pro channel.
         pushToQueue(noteOffQueue_[channel], key);
     }
 }
@@ -106,7 +106,7 @@ uint8_t MidiStateManager::getVelocity(uint8_t channel, uint8_t key) const
         return activeNotes_[slot].velocity;
     }
     
-    return 0; // Defaultní velocity pokud nota není aktivní
+    return 0; // Výchozí velocity, pokud nota není aktivní
 }
 
 void MidiStateManager::setPitchWheel(int16_t pitchWheelValue)
@@ -125,7 +125,7 @@ void MidiStateManager::setControllerValue(uint8_t channel, uint8_t controller, u
     
     controllerValues_[channel][controller] = value;
     
-    // Logování pouze pro důležité controllery
+    // Logování pouze pro vybrané controllery.
     if (controller == 1 || controller == 7 || controller == 10 || controller == 64) {
         juce::String ccName = "CC" + juce::String(controller);
         if (controller == 1) ccName = "Modulation";
@@ -153,7 +153,7 @@ void MidiStateManager::processMidiBuffer(const juce::MidiBuffer& midiBuffer)
         auto message = midiMetadata.getMessage();
         
         if (message.isNoteOn()) {
-            // MIDI Note On s velocity 0 = Note Off
+            // MIDI Note On s velocity 0 se považuje za Note Off.
             if (message.getVelocity() == 0) {
                 putNoteOff(message.getChannel() - 1, message.getNoteNumber());
             } else {
@@ -164,7 +164,7 @@ void MidiStateManager::processMidiBuffer(const juce::MidiBuffer& midiBuffer)
             putNoteOff(message.getChannel() - 1, message.getNoteNumber());
         }
         else if (message.isPitchWheel()) {
-            // Převod z JUCE formátu na signed int16 (-8192 až +8191)
+            // Převod z JUCE rozsahu (0-16383) na signed int16 (-8192 až +8191).
             int pitchWheelValue = message.getPitchWheelValue() - 8192;
             setPitchWheel(pitchWheelValue);
         }
@@ -209,7 +209,7 @@ int MidiStateManager::findNoteSlot(uint8_t channel, uint8_t key) const
             return i;
         }
     }
-    return -1; // Nenalezen
+    return -1; // Slot nenalezen
 }
 
 int MidiStateManager::findFreeSlot() const
@@ -224,22 +224,23 @@ int MidiStateManager::findFreeSlot() const
 
 void MidiStateManager::pushToQueue(NoteQueue& queue, uint8_t note)
 {
-    if (queue.count < 128) {
+    if (queue.count < 256) {
         queue.notes[queue.writeIndex] = note;
-        queue.writeIndex = (queue.writeIndex + 1) % 128;
+        queue.writeIndex++;  // uint8 overflow automaticky wrap-around na 0 po 255
         queue.count++;
     }
+    // Pokud je buffer plný, nová položka se ignoruje (sliding window není potřeba, protože velikost je fixed)
 }
 
 uint8_t MidiStateManager::popFromQueue(NoteQueue& queue)
 {
     if (queue.count > 0) {
         uint8_t note = queue.notes[queue.readIndex];
-        queue.readIndex = (queue.readIndex + 1) % 128;
+        queue.readIndex++;  // uint8 overflow automaticky wrap-around na 0 po 255
         queue.count--;
         return note;
     }
-    return 0xff; // Queue je prázdná
+    return 0xff; // Fronta je prázdná
 }
 
 #ifdef _WIN32
