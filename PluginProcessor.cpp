@@ -80,36 +80,48 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
     try {
         // Validace vstupních parametrů
         if (sampleRate <= 0.0 || sampleRate > 192000.0) {
+            logger_.log("PluginProcessor/prepareToPlay", "error", "Neplatný sample rate: " + juce::String(sampleRate));
             throw std::invalid_argument(("Neplatný sample rate: " + juce::String(sampleRate)).toStdString());
         }
         
         if (samplesPerBlock <= 0 || samplesPerBlock > 8192) {
+            logger_.log("PluginProcessor/prepareToPlay", "error", "Neplatná velikost bufferu: " + juce::String(samplesPerBlock));
             throw std::invalid_argument(("Neplatná velikost bufferu: " + juce::String(samplesPerBlock)).toStdString());
         }
         
-        // Dočasné zastavení zpracování během inicializace
-        processingEnabled_.store(false);
-        synthState_.store(SynthState::Initializing);
+        // Nová kontrola: Inicializuj jen při změně sample rate nebo chybovém stavu
+        bool needsReinit = (sampleRate != sampleRate_) || (synthState_.load() == SynthState::Error) || (synthState_.load() == SynthState::Uninitialized);
         
-        sampleRate_ = sampleRate;
-        samplesPerBlock_ = samplesPerBlock;
+        sampleRate_ = sampleRate;  // Vždy ulož sample rate
+        samplesPerBlock_ = samplesPerBlock;  // Vždy ulož velikost bufferu
         
         logger_.log("PluginProcessor/prepareToPlay", "info", "Parametry validovány a uloženy");
         
-        // Inicializace syntezátoru
-        initializeSynth();
+        if (needsReinit) {
+            // Dočasné zastavení zpracování jen při reinicializaci
+            processingEnabled_.store(false);
+            synthState_.store(SynthState::Initializing);
+            
+            logger_.log("PluginProcessor/prepareToPlay", "info", "Provádím reinicializaci (změna sample rate nebo stav vyžaduje)");
+            initializeSynth();
+        } else {
+            logger_.log("PluginProcessor/prepareToPlay", "info", "Žádná reinicializace není potřeba (jen změna velikosti bufferu)");
+            // Zde zajistíme, že processing zůstane zapnutý a stav Ready
+        }
         
-        // Povolení zpracování pouze po úspěšné inicializaci
+        // Povolení zpracování pouze po úspěšné inicializaci (pokud proběhla)
         if (synthState_.load() == SynthState::Ready) {
             processingEnabled_.store(true);
             logger_.log("PluginProcessor/prepareToPlay", "info", "Audio zpracování povoleno");
         }
         
     } catch (const std::exception& e) {
+        logger_.log("PluginProcessor/prepareToPlay", "error", "Chyba v prepareToPlay: " + juce::String(e.what()));
         handleSynthError("Chyba v prepareToPlay: " + juce::String(e.what()));
         synthState_.store(SynthState::Error);
         processingEnabled_.store(false);
     } catch (...) {
+        logger_.log("PluginProcessor/prepareToPlay", "error", "Neznámá chyba v prepareToPlay");
         handleSynthError("Neznámá chyba v prepareToPlay");
         synthState_.store(SynthState::Error);
         processingEnabled_.store(false);
@@ -162,34 +174,28 @@ void AudioPluginAudioProcessor::initializeSynth()
     logger_.log("PluginProcessor/initializeSynth", "info", "Zahájení inicializace syntezátoru");
     
     try {
-        // Kontrola sample rate
         if (sampleRate_ <= 0.0) {
             throw std::runtime_error("Sample rate není nastaven");
         }
         
         logger_.log("PluginProcessor/initializeSynth", "info", "Inicializace sample library...");
-        
-        // Progress callback pro sledování loading
-        auto progressCallback = [this](int current, int total, const juce::String& status) {
-            if (current % 100 == 0 || current == total) { // Log každých 100 samples
-                logger_.log("PluginProcessor/initializeSynth", "info",
-                           "Loading progress: " + juce::String(current) + "/" + juce::String(total) + 
-                           " - " + status);
-            }
-        };
-        
-        sampleLibrary_.initialize(sampleRate_, progressCallback);
+        sampleLibrary_.initialize(sampleRate_);
         
         // Kontrola, zda byla inicializace úspěšná
-        int availableNotes = sampleLibrary_.getAvailableNoteCount();
-        if (availableNotes == 0) {
-            throw std::runtime_error("Žádné vzorky nebyly vygenerovány");
+        bool hasValidSamples = false;
+        for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
+            for (uint8_t level = 0; level < 8; ++level) {
+                if (sampleLibrary_.isNoteAvailable(note, level)) {
+                    hasValidSamples = true;
+                    break;
+                }
+            }
+            if (hasValidSamples) break;
         }
         
-        // Výpis loading statistik
-        const auto& stats = sampleLibrary_.getLoadingStats();
-        logger_.log("PluginProcessor/initializeSynth", "info", 
-                   "Sample library inicializována: " + stats.getDescription());
+        if (!hasValidSamples) {
+            throw std::runtime_error("Žádné vzorky nebyly vygenerovány");
+        }
         
         synthState_.store(SynthState::Ready);
         logger_.log("PluginProcessor/initializeSynth", "info", "Syntezátor úspěšně inicializován");
