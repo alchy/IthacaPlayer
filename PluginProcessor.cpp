@@ -65,11 +65,6 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
     DBG("Processor destructor completed");
 }
 
-/**
- * @brief Příprava na přehrávání s kompletním error handlingem.
- * @param sampleRate Sample rate
- * @param samplesPerBlock Blok velikost
- */
 void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     logger_.log("PluginProcessor/prepareToPlay", "info", "=== ZAHÁJENÍ PREPARE TO PLAY ===");
@@ -89,30 +84,67 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
             throw std::invalid_argument(("Neplatná velikost bufferu: " + juce::String(samplesPerBlock)).toStdString());
         }
         
-        // Nová kontrola: Inicializuj jen při změně sample rate nebo chybovém stavu
-        bool needsReinit = (sampleRate != sampleRate_) || (synthState_.load() == SynthState::Error) || (synthState_.load() == SynthState::Uninitialized);
+        // Uložení starých hodnot pro porovnání
+        double oldSampleRate = sampleRate_;
+        int oldBufferSize = samplesPerBlock_;
         
-        sampleRate_ = sampleRate;  // Vždy ulož sample rate
-        samplesPerBlock_ = samplesPerBlock;  // Vždy ulož velikost bufferu
+        // Uložení nových parametrů
+        sampleRate_ = sampleRate;
+        samplesPerBlock_ = samplesPerBlock;
         
-        logger_.log("PluginProcessor/prepareToPlay", "info", "Parametry validovány a uloženy");
+        // TEPRVE TEĎ detekce změn (po uložení nových hodnot)
+        bool sampleRateChanged = (std::abs(sampleRate - oldSampleRate) > 1.0);
+        bool bufferSizeChanged = (samplesPerBlock != oldBufferSize);
+        bool isFirstInit = (synthState_.load() == SynthState::Uninitialized);
+        bool hasError = (synthState_.load() == SynthState::Error);
         
-        if (needsReinit) {
-            // Dočasné zastavení zpracování jen při reinicializaci
+        logger_.log("PluginProcessor/prepareToPlay", "info", 
+                   "Změny - SampleRate: " + juce::String(sampleRateChanged ? "ANO" : "NE") + 
+                   " (" + juce::String(oldSampleRate) + " -> " + juce::String(sampleRate) + ")" +
+                   ", BufferSize: " + juce::String(bufferSizeChanged ? "ANO" : "NE") + 
+                   " (" + juce::String(oldBufferSize) + " -> " + juce::String(samplesPerBlock) + ")" +
+                   ", FirstInit: " + juce::String(isFirstInit ? "ANO" : "NE") + 
+                   ", HasError: " + juce::String(hasError ? "ANO" : "NE"));
+        
+        // OPTIMALIZACE: Reinicializace pouze když je skutečně potřeba
+        bool needsFullReinit = isFirstInit || hasError || sampleRateChanged;
+        
+        if (needsFullReinit) {
+            logger_.log("PluginProcessor/prepareToPlay", "info", 
+                       "Provádím PLNOU reinicializaci - důvod: " + 
+                       juce::String(isFirstInit ? "první inicializace" : 
+                                   hasError ? "chybový stav" : 
+                                   sampleRateChanged ? "změna sample rate" : "neznámý"));
+            
+            // Dočasné zastavení zpracování
             processingEnabled_.store(false);
             synthState_.store(SynthState::Initializing);
             
-            logger_.log("PluginProcessor/prepareToPlay", "info", "Provádím reinicializaci (změna sample rate nebo stav vyžaduje)");
+            // Plná reinicializace (vzorky, voice manager, atd.)
             initializeSynth();
+            
+        } else if (bufferSizeChanged) {
+            logger_.log("PluginProcessor/prepareToPlay", "info", 
+                       "Změna POUZE velikosti bufferu z " + juce::String(oldBufferSize) + 
+                       " na " + juce::String(samplesPerBlock) + 
+                       " - žádná reinicializace vzorků není potřeba");
+            
+            // Pouze logování změny - žádná reinicializace
+            // Audio systém už je připraven, jen se změnila velikost bloku
+            
         } else {
-            logger_.log("PluginProcessor/prepareToPlay", "info", "Žádná reinicializace není potřeba (jen změna velikosti bufferu)");
-            // Zde zajistíme, že processing zůstane zapnutý a stav Ready
+            logger_.log("PluginProcessor/prepareToPlay", "info", 
+                       "Žádné změny nevyžadují akci - stav zůstává: " + getStateDescription());
         }
         
-        // Povolení zpracování pouze po úspěšné inicializaci (pokud proběhla)
+        // Povolení zpracování pouze pokud je vše v pořádku
         if (synthState_.load() == SynthState::Ready) {
             processingEnabled_.store(true);
             logger_.log("PluginProcessor/prepareToPlay", "info", "Audio zpracování povoleno");
+        } else if (!needsFullReinit) {
+            // Pokud nebyla reinicializace a přesto není Ready, je problém
+            logger_.log("PluginProcessor/prepareToPlay", "warn", 
+                       "Neočekávaný stav po změně bufferu: " + getStateDescription());
         }
         
     } catch (const std::exception& e) {
@@ -127,7 +159,10 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
         processingEnabled_.store(false);
     }
     
-    logger_.log("PluginProcessor/prepareToPlay", "info", "=== PREPARE TO PLAY DOKONČEN - Stav: " + getStateDescription() + " ===");
+    logger_.log("PluginProcessor/prepareToPlay", "info", 
+               "=== PREPARE TO PLAY DOKONČEN - Stav: " + getStateDescription() + 
+               ", SampleRate: " + juce::String(sampleRate_) + 
+               ", BufferSize: " + juce::String(samplesPerBlock_) + " ===");
     DBG("prepareToPlay completed with state: " + getStateDescription());
 }
 
