@@ -21,9 +21,10 @@ private:
     // Reference na procesor
     AudioPluginAudioProcessor& processorRef;
 
-    // Komponenty pro logování
+    // Komponenty pro logování a ovládání
     std::unique_ptr<juce::TextEditor> logDisplay;
     std::unique_ptr<juce::ToggleButton> toggleLogging;
+    std::unique_ptr<juce::TextButton> clearLogsButton;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };
