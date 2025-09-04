@@ -1,3 +1,11 @@
+## Cesty na build soubory
+
+[build]   juce_vst3_helper.vcxproj .\build\Debug\juce_vst3_helper.exe
+[build]   IthacaPlayer.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\IthacaPlayer_SharedCode.lib
+[build]   IthacaPlayer_VST3.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3
+[build]   IthacaPlayer_Standalone.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe
+
+
 ## Nastavení vývojového prostředí
 
 Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) proveďte následující kroky. Předpokládá se instalace Visual Studio Build Tools (s MSVC kompilátorem: https://visualstudio.microsoft.com/cs/visual-cpp-build-tools/) a CMake.
