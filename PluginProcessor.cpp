@@ -10,24 +10,55 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ), synthInitialized_(false)
 {
-    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "=== APLIKACE SPUSTENA ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "=== ITHACA PLAYER SPUSTEN ===");
     Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Inicializace procesoru");
+    
+    // Základní info o pluginu (podobné vašemu printf výpisu v main)
     Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Plugin nazev: " + getName());
     Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Je synthesizer: " + juce::String(JucePlugin_IsSynth ? "ANO" : "NE"));
     Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Prijima MIDI: " + juce::String(acceptsMidi() ? "ANO" : "NE"));
     Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Produkuje MIDI: " + juce::String(producesMidi() ? "ANO" : "NE"));
+    
+    // Inicializace synth komponent (podobné vašemu main() - vytvoření objektů)
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "=== VYTVARENI SYNTH KOMPONENT ===");
+    
+    // Zatím používáme dummy sample rate - bude aktualizován v prepareToPlay (podobné vaší setupMIDI logice)
+    sampleLibrary_ = std::make_unique<SampleLibrary>(44100.0);
+    midiStateManager_ = std::make_unique<MidiStateManager>();
+    voiceManager_ = std::make_unique<VoiceManager>(16); // 16 hlasů jako ve vaší voice_[16]
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Sample Library vytvoren");
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "MIDI State Manager vytvoren");
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "Voice Manager vytvoren s " + juce::String(voiceManager_->getVoiceCount()) + " hlasy");
+    
+    Logger::getInstance().log("AudioPluginAudioProcessor/constructor", "info", "=== KONSTRUKTOR DOKONCEN ===");
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 {
-    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "=== APLIKACE SE UKONCUJE ===");
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "=== ITHACA PLAYER SE UKONCUJE ===");
     Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Zahajeni destrukce procesoru");
+    
+    // Nejprve odstraníme referenci na editor v Loggeru (bezpečnost)
     Logger::getInstance().setEditor(nullptr);
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Logger reference odstranena");
+    
+    // Uvolnění synth komponent (v opačném pořadí než byly vytvořeny)
+    voiceManager_.reset();
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Voice Manager uvolnen");
+    
+    midiStateManager_.reset();
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "MIDI State Manager uvolnen");
+    
+    sampleLibrary_.reset();
+    Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "Sample Library uvolnena");
+    
     Logger::getInstance().log("AudioPluginAudioProcessor/destructor", "info", "=== DESTRUKCE DOKONCENA ===");
 }
 
+//==============================================================================
 const juce::String AudioPluginAudioProcessor::getName() const
 {
     return JucePlugin_Name;
@@ -93,6 +124,7 @@ void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String
     juce::ignoreUnused (index, newName);
 }
 
+//==============================================================================
 void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "=== PRIPRAVA AUDIO PROCESINGU ===");
@@ -101,9 +133,33 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Vstupni kanaly: " + juce::String(getTotalNumInputChannels()));
     Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Vystupni kanaly: " + juce::String(getTotalNumOutputChannels()));
     
-    // Vypocet latence
+    // Výpočet latence
     double latencyMs = (double)samplesPerBlock / sampleRate * 1000.0;
     Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "Odhadovana latence: " + juce::String(latencyMs, 2) + " ms");
+    
+    // Inicializace synth pouze jednou nebo při změně sample rate (podobné vaší setupMIDI + lfo_ticker.attach logice)
+    if (!synthInitialized_ || sampleLibrary_->getSampleRate() != sampleRate) {
+        Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "=== INICIALIZACE SAMPLE LIBRARY ===");
+        
+        // Reinicializace s korektní sample rate (podobné vašemu scan_bus workflow)
+        sampleLibrary_ = std::make_unique<SampleLibrary>(sampleRate);
+        sampleLibrary_->initializeLibrary();
+        
+        // Generování prototypu pro střední C (podobné vašemu build_dumb_voices -> assign_dcos_to_voices workflow)
+        float middleCFreq = 261.63f; // C4 frequency
+        if (sampleLibrary_->generateSineWaveForNote(SAMPLE_NOTE_FOR_PROTOTYPE, middleCFreq)) {
+            Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", 
+                "Sample pro MIDI notu " + juce::String(SAMPLE_NOTE_FOR_PROTOTYPE) + " (Middle C) vygenerovan");
+            Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", 
+                "Frekvence: " + juce::String(middleCFreq, 2) + " Hz");
+        } else {
+            Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "warn", 
+                "CHYBA: Nepodal se vygenerovat sample pro MIDI notu " + juce::String(SAMPLE_NOTE_FOR_PROTOTYPE));
+        }
+        
+        synthInitialized_ = true;
+        Logger::getInstance().log("AudioPluginAudioProcessor/prepareToPlay", "info", "=== SYNTH READY TO PLAY ===");
+    }
     
     juce::ignoreUnused (sampleRate, samplesPerBlock);
 }
@@ -112,6 +168,9 @@ void AudioPluginAudioProcessor::releaseResources()
 {
     Logger::getInstance().log("AudioPluginAudioProcessor/releaseResources", "info", "=== UVOLNOVANI AUDIO ZDROJU ===");
     Logger::getInstance().log("AudioPluginAudioProcessor/releaseResources", "info", "Audio processing zastaven");
+    
+    // Reset synth state při ukončení audio processingu
+    synthInitialized_ = false;
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -150,109 +209,26 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layou
 void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                               juce::MidiBuffer& midiMessages)
 {
-    // Pocitadlo pro omezeni logovani
+    // Počítadlo pro omezení logování (podobné vašemu printf omezení)
     static int processCount = 0;
-    static int totalMidiEvents = 0;
     processCount++;
     
-    // Detailni logování prvnich bloku
-    if (processCount <= 5)
-    {
+    // Logování prvních několika bloků pro debugging
+    if (processCount <= 5) {
         Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
-            "Audio blok #" + juce::String(processCount) + " - velikost: " + juce::String(buffer.getNumSamples()) + 
-            " samples, kanaly: " + juce::String(buffer.getNumChannels()));
-            
-        // Analyza amplitudy pro prvni bloky
-        if (buffer.getNumChannels() > 0)
-        {
-            float maxAmplitude = 0.0f;
-            for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-            {
-                auto* channelData = buffer.getReadPointer(channel);
-                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-                {
-                    maxAmplitude = juce::jmax(maxAmplitude, std::abs(channelData[sample]));
-                }
-            }
-            Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
-                "Maximalni amplituda v bloku: " + juce::String(maxAmplitude, 6));
-        }
-    }
-    else if (processCount % 1000 == 0)
-    {
+            "Audio blok #" + juce::String(processCount) + " - samples: " + juce::String(buffer.getNumSamples()) + 
+            ", kanaly: " + juce::String(buffer.getNumChannels()));
+    } else if (processCount % 1000 == 0) {
         Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "debug", 
-            "Zpracovano " + juce::String(processCount) + " audio bloku, celkem MIDI: " + juce::String(totalMidiEvents));
+            "Zpracovano " + juce::String(processCount) + " audio bloku");
     }
     
-    // Detailni MIDI logování
-    if (!midiMessages.isEmpty())
-    {
-        int midiEventsInBlock = 0;
-        Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", "=== MIDI UDALOSTI ===");
-        
-        for (const auto& midiMetadata : midiMessages)
-        {
-            auto message = midiMetadata.getMessage();
-            int sampleNumber = midiMetadata.samplePosition;
-            midiEventsInBlock++;
-            totalMidiEvents++;
-            
-            juce::String midiInfo = "MIDI #" + juce::String(totalMidiEvents) + 
-                                   " @ sample " + juce::String(sampleNumber) + ": ";
-            
-            if (message.isNoteOn())
-            {
-                midiInfo += "NOTE ON - Note: " + juce::String(message.getNoteNumber()) + 
-                           " (" + message.getMidiNoteName(message.getNoteNumber(), true, true, 4) + ")" +
-                           ", Velocity: " + juce::String(message.getVelocity()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isNoteOff())
-            {
-                midiInfo += "NOTE OFF - Note: " + juce::String(message.getNoteNumber()) + 
-                           " (" + message.getMidiNoteName(message.getNoteNumber(), true, true, 4) + ")" +
-                           ", Velocity: " + juce::String(message.getVelocity()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isController())
-            {
-                midiInfo += "CC - Controller: " + juce::String(message.getControllerNumber()) +
-                           ", Value: " + juce::String(message.getControllerValue()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isPitchWheel())
-            {
-                midiInfo += "PITCH BEND - Value: " + juce::String(message.getPitchWheelValue()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isProgramChange())
-            {
-                midiInfo += "PROGRAM CHANGE - Program: " + juce::String(message.getProgramChangeNumber()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isChannelPressure())
-            {
-                midiInfo += "CHANNEL PRESSURE - Pressure: " + juce::String(message.getChannelPressureValue()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else if (message.isAftertouch())
-            {
-                midiInfo += "AFTERTOUCH - Note: " + juce::String(message.getNoteNumber()) +
-                           ", Pressure: " + juce::String(message.getAfterTouchValue()) +
-                           ", Channel: " + juce::String(message.getChannel());
-            }
-            else
-            {
-                midiInfo += "OTHER - " + message.getDescription();
-            }
-            
-            Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", midiInfo);
-        }
-        
-        Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", 
-            "Celkem MIDI udalosti v bloku: " + juce::String(midiEventsInBlock));
+    // Pokud synth není inicializován, vygeneruj tichý výstup
+    if (!synthInitialized_) {
+        buffer.clear();
+        return;
     }
-
+    
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -261,15 +237,49 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // Zde by bylo audio processing - momentálně jen passthrough
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // TODO: Implementovat audio processing
+    // === HLAVNÍ SYNTH PROCESSING LOOP - inspirováno vaší main while(1) loop ===
+    
+    // 1. MIDI zpracování (podobné vašemu midiParser.Parse())
+    if (!midiMessages.isEmpty()) {
+        if (processCount <= 10) { // Log pouze prvních 10 bloků s MIDI
+            Logger::getInstance().log("AudioPluginAudioProcessor/processBlock", "info", "=== ZPRACOVANI MIDI ZPRAV ===");
+        }
+        midiStateManager_->processMidiBuffer(midiMessages);
+    }
+    
+    // 2. Voice management - zpracování MIDI událostí (podobné vašemu pop_map_note_on/off pattern)
+    voiceManager_->processMidiEvents(*midiStateManager_);
+    
+    // 3. Audio generování (podobné vašemu performer.refresh())
+    for (int channel = 0; channel < totalNumOutputChannels; ++channel) {
+        auto* channelData = buffer.getWritePointer(channel);
+        
+        // Pro prototyp - generuj pouze do prvního kanálu, kopíruj do ostatních
+        if (channel == 0) {
+            // Vyčisti buffer
+            buffer.clear(channel, 0, buffer.getNumSamples());
+            
+            // Generuj audio ze všech hlasů
+            voiceManager_->generateAudio(channelData, buffer.getNumSamples(), *sampleLibrary_);
+        } else {
+            // Kopíruj z prvního kanálu (mono -> stereo pro prototyp)
+            auto* sourceData = buffer.getReadPointer(0);
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample) {
+                channelData[sample] = sourceData[sample];
+            }
+        }
+    }
+    
+    // 4. Refresh cycle (podobné vašemu performer.refresh())
+    voiceManager_->refresh();
+    
+    // Periodické logování aktivních hlasů pro debugging
+    if (processCount % 5000 == 0) {
+        midiStateManager_->logActiveNotes();
     }
 }
 
+//==============================================================================
 bool AudioPluginAudioProcessor::hasEditor() const
 {
     return true;
@@ -282,6 +292,7 @@ juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
     return new AudioPluginAudioProcessorEditor (*this);
 }
 
+//==============================================================================
 void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     Logger::getInstance().log("AudioPluginAudioProcessor/getStateInformation", "info", "Ukladani stavu pluginu");
@@ -295,6 +306,8 @@ void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeI
     juce::ignoreUnused (data, sizeInBytes);
 }
 
+//==============================================================================
+// POVINNÁ factory funkce pro JUCE pluginy
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();

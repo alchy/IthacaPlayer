@@ -2,6 +2,9 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Logger.h"
+#include "SampleLibrary.h"
+#include "MidiStateManager.h"
+#include "VoiceManager.h"
 
 //==============================================================================
 class AudioPluginAudioProcessor final : public juce::AudioProcessor
@@ -44,9 +47,14 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
 private:
-    // Sledování, zda byla alokována konzole
-    bool consoleAllocated;
-
+    // Synth komponenty - inspirováno vaším global dco[16], chain[64] pattern
+    std::unique_ptr<SampleLibrary> sampleLibrary_;
+    std::unique_ptr<MidiStateManager> midiStateManager_;
+    std::unique_ptr<VoiceManager> voiceManager_;
+    
+    // State management
+    bool synthInitialized_;
+    
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
 };
