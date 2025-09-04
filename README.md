@@ -5,6 +5,9 @@
 [build]   IthacaPlayer_VST3.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3
 [build]   IthacaPlayer_Standalone.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe
 
+## Cesta na aplikacni data
+
+C:\Users\nemej992\AppData\Roaming\IthacaPlayer
 
 ## Nastavení vývojového prostředí
 
