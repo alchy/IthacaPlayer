@@ -1,52 +1,34 @@
 #include "SampleLoader.h"
-#include <cmath>
-#include <fstream>
+#include <cmath>  // Pro std::sin, std::pow atd.
 
-// Definice static array pro MSVC kompatibilitu
-const float SampleLoader::DYNAMIC_AMPLITUDES[8] = {
-    0.05f,  // vel0 - pppp (velocity 1-16)
-    0.12f,  // vel1 - ppp  (velocity 17-32)
-    0.22f,  // vel2 - pp   (velocity 33-48)
-    0.35f,  // vel3 - p    (velocity 49-64)
-    0.50f,  // vel4 - mp   (velocity 65-80)
-    0.68f,  // vel5 - mf   (velocity 81-96)
-    0.85f,  // vel6 - f    (velocity 97-112)
-    1.00f   // vel7 - ff   (velocity 113-127)
-};
+// Definice konstant
+const float SampleLoader::DYNAMIC_AMPLITUDES[8] = {0.05f, 0.1f, 0.2f, 0.3f, 0.4f, 0.6f, 0.8f, 1.0f};
 
 /**
- * @brief Konstruktor SampleLoader
+ * @brief Konstruktor SampleLoader.
+ * Inicializuje format manager a logger.
  */
 SampleLoader::SampleLoader(double sampleRate)
     : sampleRate_(sampleRate), logger_(Logger::getInstance())
 {
-    // Registrace audio formátů (WAV, AIFF, atd.)
-    formatManager_.registerBasicFormats();
-    
-    logger_.log("SampleLoader/constructor", "info", 
-               "SampleLoader inicializován se sample rate " + juce::String(sampleRate_));
+    formatManager_.registerBasicFormats();  // Registrace WAV atd.
 }
 
 /**
- * @brief Načte kompletní instrument - všechny noty × všechny dynamic levels
+ * @brief Načte kompletní instrument.
+ * Iteruje přes noty a levels, volá loadSingleSample.
  */
 std::vector<LoadedSample> SampleLoader::loadInstrument(
     const juce::File& instrumentDirectory,
-    ProgressCallback progressCallback)
-{
-    auto startTime = juce::Time::getMillisecondCounterHiRes();
+    ProgressCallback progressCallback
+) {
     std::vector<LoadedSample> loadedSamples;
+    loadingStats_ = LoadingStats{};  // Reset statistik
     
-    // Reset statistik
-    loadingStats_ = LoadingStats();
-    loadingStats_.totalExpected = (MAX_NOTE - MIN_NOTE + 1) * NUM_DYNAMIC_LEVELS; // 88 × 8 = 704
+    double startTime = juce::Time::getMillisecondCounterHiRes();
+    loadingStats_.totalExpected = (MAX_NOTE - MIN_NOTE + 1) * NUM_DYNAMIC_LEVELS;
     
-    logger_.log("SampleLoader/loadInstrument", "info", 
-               "Začátek načítání instrumentu z directory: " + instrumentDirectory.getFullPathName());
-    logger_.log("SampleLoader/loadInstrument", "info", 
-               "Očekáváno " + juce::String(loadingStats_.totalExpected) + " souborů");
-    
-    // Zajištění existence directory
+    // Vytvoření directory pokud neexistuje
     if (!instrumentDirectory.exists()) {
         if (!instrumentDirectory.createDirectory()) {
             logger_.log("SampleLoader/loadInstrument", "error", 
@@ -71,7 +53,7 @@ std::vector<LoadedSample> SampleLoader::loadInstrument(
                 }
                 
                 LoadedSample sample = loadSingleSample(instrumentDirectory, note, level);
-                loadedSamples.push_back(std::move(sample));
+                loadedSamples.push_back(std::move(sample));  // Použij move pro přesun
                 
                 ++processed;
                 
@@ -98,76 +80,80 @@ std::vector<LoadedSample> SampleLoader::loadInstrument(
 }
 
 /**
- * @brief Načte jeden konkrétní sample
+ * @brief Načte jeden konkrétní sample.
+ * Pokusí se načíst pro target SR, fallback na base SR s resamplingem a ukládáním.
  */
 LoadedSample SampleLoader::loadSingleSample(
     const juce::File& instrumentDirectory,
     uint8_t midiNote, 
-    uint8_t dynamicLevel)
-{
-    juce::String filename = generateFilename(midiNote, dynamicLevel);
-    juce::File sampleFile = instrumentDirectory.getChildFile(filename);
+    uint8_t dynamicLevel
+) {
+    double baseSR = 44100.0;
+    double otherSR = (std::abs(sampleRate_ - 44100.0) < 1.0) ? 48000.0 : 44100.0;
     
-    logger_.log("SampleLoader/loadSingleSample", "debug",
-               "Pokus o načtení: " + sampleFile.getFullPathName());
-    
-    // Pokus o načtení existujícího souboru
-    if (sampleFile.exists()) {
-        try {
-            LoadedSample sample = loadWavFile(sampleFile, midiNote, dynamicLevel);
-            loadingStats_.filesLoaded++;
-            loadingStats_.totalMemoryUsed += sample.getDataSize();
-            
-            logger_.log("SampleLoader/loadSingleSample", "debug",
-                       "Úspěšně načten soubor: " + filename + 
-                       " (" + juce::String(sample.isStereo() ? "stereo" : "mono") + ")");
-            return sample;
-            
-        } catch (const std::exception& e) {
-            logger_.log("SampleLoader/loadSingleSample", "warn",
-                       "Chyba při načítání " + filename + ": " + juce::String(e.what()) + 
-                       " - generuji náhradu");
-        }
-    } else {
-        logger_.log("SampleLoader/loadSingleSample", "warn",
-                   "Soubor neexistuje, generuji placeholder: " + filename);
-    }
-    
-    // Fallback: generování sine wave
-    try {
-        LoadedSample sample = generateSineWave(midiNote, dynamicLevel);
-        loadingStats_.filesGenerated++;
+    // Zkus target SR
+    juce::String targetFilename = generateFilename(midiNote, dynamicLevel, sampleRate_);
+    juce::File targetFile = instrumentDirectory.getChildFile(targetFilename);
+    if (targetFile.exists()) {
+        LoadedSample sample = loadWavFile(targetFile, midiNote, dynamicLevel);
+        loadingStats_.filesLoaded++;
         loadingStats_.totalMemoryUsed += sample.getDataSize();
-        
-        // Pokus o uložení vygenerovaného sample
-        if (saveGeneratedSample(sample, sampleFile)) {
-            loadingStats_.filesSaved++;
-            logger_.log("SampleLoader/loadSingleSample", "info",
-                       "Generovaný sample uložen: " + filename);
-        }
-        
+        logger_.log("SampleLoader/loadSingleSample", "debug",
+                   "Úspěšně načten soubor: " + targetFilename + 
+                   " (" + juce::String(sample.isStereo() ? "stereo" : "mono") + ")");
         return sample;
-        
-    } catch (const std::exception& e) {
-        logger_.log("SampleLoader/loadSingleSample", "error",
-                   "Fatální chyba při generování sample pro " + filename + 
-                   ": " + juce::String(e.what()));
-        throw;
     }
+    
+    // Zkus other SR a resampluj
+    juce::String otherFilename = generateFilename(midiNote, dynamicLevel, otherSR);
+    juce::File otherFile = instrumentDirectory.getChildFile(otherFilename);
+    if (otherFile.exists()) {
+        LoadedSample otherSample = loadWavFile(otherFile, midiNote, dynamicLevel);  // Načti a resampluj interně
+        saveGeneratedSample(otherSample, targetFile);  // Ulož resamplovanou verzi pro target
+        loadingStats_.filesLoaded++;
+        loadingStats_.filesSaved++;
+        loadingStats_.totalMemoryUsed += otherSample.getDataSize();
+        logger_.log("SampleLoader/loadSingleSample", "info",
+                   "Fallback na resampling z " + otherFilename + " a uložení " + targetFilename);
+        return otherSample;
+    }
+    
+    // Generuj pro base (44100)
+    LoadedSample baseSample = generateSineWave(midiNote, dynamicLevel);  // Generuj pro baseSR
+    baseSample.originalSampleRate = baseSR;
+    juce::String baseFilename = generateFilename(midiNote, dynamicLevel, baseSR);
+    juce::File baseFile = instrumentDirectory.getChildFile(baseFilename);
+    saveGeneratedSample(baseSample, baseFile);  // Ulož base
+    loadingStats_.filesGenerated++;
+    loadingStats_.filesSaved++;
+    loadingStats_.totalMemoryUsed += baseSample.getDataSize();
+    
+    // Resampluj na 48000 a ulož
+    uint32_t resampledLength;
+    auto resampledData = resampleIfNeeded(baseSample.audioData.get(), baseSample.lengthSamples, baseSR, resampledLength);
+    LoadedSample resampledSample(std::move(baseSample));  // Použij move konstruktor
+    resampledSample.audioData = std::move(resampledData);
+    resampledSample.lengthSamples = resampledLength;
+    resampledSample.originalSampleRate = 48000.0;
+    juce::String resampledFilename = generateFilename(midiNote, dynamicLevel, 48000.0);
+    juce::File resampledFile = instrumentDirectory.getChildFile(resampledFilename);
+    saveGeneratedSample(resampledSample, resampledFile);
+    loadingStats_.filesGenerated++;
+    loadingStats_.filesSaved++;
+    
+    // Vrátíme verzi pro target SR
+    return (std::abs(sampleRate_ - baseSR) < 1.0) ? std::move(baseSample) : std::move(resampledSample);
 }
 
 /**
- * @brief Načte WAV soubor s optional resampling
+ * @brief Načte WAV soubor s optional resampling.
  */
-LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote, uint8_t dynamicLevel)
-{
-    // 1. Analýza souboru
+LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote, uint8_t dynamicLevel) {
     FileAnalysis analysis = analyzeWavFile(file);
     if (!analysis.isValid) {
         throw std::runtime_error("Invalid WAV file: " + analysis.errorMessage.toStdString());
     }
     
-    // 2. Vytvoření LoadedSample
     LoadedSample result;
     result.midiNote = midiNote;
     result.dynamicLevel = dynamicLevel;
@@ -176,30 +162,19 @@ LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote,
     result.originalSampleRate = analysis.originalSampleRate;
     result.lengthSamples = analysis.targetLengthSamples;
     
-    // 3. Načtení dat pomocí správného JUCE API
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
     if (!reader) {
         throw std::runtime_error("Cannot create reader for: " + file.getFullPathName().toStdString());
     }
     
-    // Určení počtu kanálů (zachováme stereo pokud existuje)
-    result.numChannels = static_cast<uint8_t>(std::min(2, static_cast<int>(reader->numChannels))); // Max 2 kanály
+    result.numChannels = static_cast<uint8_t>(std::min(2, static_cast<int>(reader->numChannels)));
     
-    // 4. Alokace paměti pro výsledek (interleaved pro stereo)
     size_t totalSamples = static_cast<size_t>(analysis.targetLengthSamples) * result.numChannels;
     result.audioData = std::make_unique<float[]>(totalSamples);
     
     if (analysis.needsResampling) {
-        // Resampling potřebný
-        logger_.log("SampleLoader/loadWavFile", "debug",
-                   "Resampling " + juce::String(analysis.originalSampleRate) + 
-                   "Hz -> " + juce::String(sampleRate_) + "Hz, channels: " + juce::String(result.numChannels));
-        
-        // Načtení original dat pomocí správného JUCE API
         juce::AudioBuffer<float> tempBuffer(static_cast<int>(reader->numChannels), 
                                            static_cast<int>(analysis.originalLengthSamples));
-        
-        // Správné volání JUCE read metody
         if (!reader->read(tempBuffer.getArrayOfWritePointers(), 
                          static_cast<int>(reader->numChannels), 
                          0, 
@@ -207,9 +182,7 @@ LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote,
             throw std::runtime_error("Chyba při načítání audio dat pro resampling");
         }
         
-        // Resampling a interleaving pro každý kanál
         for (int ch = 0; ch < result.numChannels; ++ch) {
-            // Použij dostupný kanál (mono soubor → duplicate, stereo → use channel)
             int sourceChannel = std::min(ch, static_cast<int>(reader->numChannels) - 1);
             const float* sourceData = tempBuffer.getReadPointer(sourceChannel);
             
@@ -221,18 +194,13 @@ LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote,
                 outputLength
             );
             
-            // Interleave do result.audioData
             for (uint32_t i = 0; i < outputLength; ++i) {
                 result.audioData[i * result.numChannels + ch] = resampledChannel[i];
             }
         }
-        
     } else {
-        // Přímé načtení bez resampling
         juce::AudioBuffer<float> tempBuffer(static_cast<int>(reader->numChannels), 
                                            static_cast<int>(analysis.originalLengthSamples));
-        
-        // Správné volání JUCE read metody
         if (!reader->read(tempBuffer.getArrayOfWritePointers(), 
                          static_cast<int>(reader->numChannels), 
                          0, 
@@ -240,7 +208,6 @@ LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote,
             throw std::runtime_error("Chyba při načítání audio dat");
         }
         
-        // Kopírování/interleaving do result
         for (uint32_t i = 0; i < analysis.originalLengthSamples; ++i) {
             for (int ch = 0; ch < result.numChannels; ++ch) {
                 int sourceChannel = std::min(ch, static_cast<int>(reader->numChannels) - 1);
@@ -253,10 +220,9 @@ LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote,
 }
 
 /**
- * @brief Vygeneruje sine wave pro danou notu a dynamic level
+ * @brief Vygeneruje sine wave pro danou notu a dynamic level (pro base SR 44100).
  */
-LoadedSample SampleLoader::generateSineWave(uint8_t midiNote, uint8_t dynamicLevel)
-{
+LoadedSample SampleLoader::generateSineWave(uint8_t midiNote, uint8_t dynamicLevel) {
     logger_.log("SampleLoader/generateSineWave", "info",
                "Generování sine vlny pro notu " + juce::String((int)midiNote) + 
                ", vrstva " + juce::String((int)dynamicLevel));
@@ -265,20 +231,18 @@ LoadedSample SampleLoader::generateSineWave(uint8_t midiNote, uint8_t dynamicLev
     result.midiNote = midiNote;
     result.dynamicLevel = dynamicLevel;
     result.isGenerated = true;
-    result.originalSampleRate = sampleRate_;
-    result.lengthSamples = static_cast<uint32_t>(sampleRate_ * SAMPLE_SECONDS);
+    result.originalSampleRate = 44100.0;  // Vždy pro base SR
+    result.lengthSamples = static_cast<uint32_t>(result.originalSampleRate * SAMPLE_SECONDS);
     result.numChannels = 1; // Generované samples jsou mono
     result.sourcePath = "Generated sine wave";
     
-    // Alokace paměti pro mono
     result.audioData = std::make_unique<float[]>(result.lengthSamples);
     
-    // Generování sine wave s správnou amplitudou pro dynamic level
     double frequency = getFrequencyForNote(midiNote);
     float amplitude = getDynamicAmplitude(dynamicLevel);
     
     const double twoPi = 2.0 * juce::MathConstants<double>::pi;
-    const double phaseInc = twoPi * frequency / sampleRate_;
+    const double phaseInc = twoPi * frequency / result.originalSampleRate;
     
     for (uint32_t i = 0; i < result.lengthSamples; ++i) {
         double phase = phaseInc * static_cast<double>(i);
@@ -293,15 +257,13 @@ LoadedSample SampleLoader::generateSineWave(uint8_t midiNote, uint8_t dynamicLev
 }
 
 /**
- * @brief Uloží vygenerovaný sample do .lau souboru
+ * @brief Uloží vygenerovaný sample do .wav souboru.
  */
-bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::File& targetFile)
-{
+bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::File& targetFile) {
     logger_.log("SampleLoader/saveGeneratedSample", "info",
                "Začátek ukládání generovaného souboru: " + targetFile.getFullPathName());
     
     try {
-        // Vytvoření WAV formátu
         juce::WavAudioFormat wavFormat;
         std::unique_ptr<juce::FileOutputStream> outputStream(targetFile.createOutputStream());
         
@@ -311,15 +273,14 @@ bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::F
             return false;
         }
         
-        // Vytvoření writer
         std::unique_ptr<juce::AudioFormatWriter> writer(
             wavFormat.createWriterFor(
                 outputStream.get(),
-                sampleRate_,
-                sample.numChannels,   // Správný počet kanálů
-                16,                   // 16-bit
-                {},                   // metadata
-                0                     // quality hint
+                sample.originalSampleRate,
+                sample.numChannels,   
+                16,                   
+                {},                   
+                0                     
             )
         );
         
@@ -329,15 +290,12 @@ bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::F
             return false;
         }
         
-        outputStream.release(); // writer převzal vlastnictví
+        outputStream.release(); 
         
-        // Příprava dat pro zápis - JUCE očekává planar format
         if (sample.numChannels == 1) {
-            // Mono - direct write
             const float* channelData = sample.audioData.get();
             writer->writeFromFloatArrays(&channelData, 1, sample.lengthSamples);
         } else {
-            // Stereo - deinterleave pro JUCE
             auto leftChannel = std::make_unique<float[]>(sample.lengthSamples);
             auto rightChannel = std::make_unique<float[]>(sample.lengthSamples);
             
@@ -371,10 +329,9 @@ bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::F
 }
 
 /**
- * @brief Analyzuje WAV soubor bez načtení dat
+ * @brief Analyzuje WAV soubor bez načtení dat (pro memory planning).
  */
-FileAnalysis SampleLoader::analyzeWavFile(const juce::File& file)
-{
+FileAnalysis SampleLoader::analyzeWavFile(const juce::File& file) {
     FileAnalysis analysis;
     
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
@@ -395,7 +352,6 @@ FileAnalysis SampleLoader::analyzeWavFile(const juce::File& file)
         analysis.targetLengthSamples = analysis.originalLengthSamples;
     }
     
-    // Memory pro stereo
     int channels = std::min(2, static_cast<int>(reader->numChannels));
     analysis.memoryRequired = analysis.targetLengthSamples * channels * sizeof(float);
     analysis.isValid = validateFileAnalysis(analysis);
@@ -404,10 +360,9 @@ FileAnalysis SampleLoader::analyzeWavFile(const juce::File& file)
 }
 
 /**
- * @brief Validuje výsledky file analýzy
+ * @brief Validuje výsledky file analýzy.
  */
-bool SampleLoader::validateFileAnalysis(const FileAnalysis& analysis)
-{
+bool SampleLoader::validateFileAnalysis(const FileAnalysis& analysis) {
     if (analysis.originalLengthSamples == 0) {
         return false;
     }
@@ -424,15 +379,14 @@ bool SampleLoader::validateFileAnalysis(const FileAnalysis& analysis)
 }
 
 /**
- * @brief Provede resampling pokud je potřeba
+ * @brief Provede resampling pokud je potřeba.
  */
 std::unique_ptr<float[]> SampleLoader::resampleIfNeeded(
     const float* sourceData, 
     uint32_t sourceLength, 
     double sourceSampleRate,
-    uint32_t& outputLength)
-{
-    // Jednoduchý lineární resampling
+    uint32_t& outputLength
+) {
     double ratio = sampleRate_ / sourceSampleRate;
     outputLength = static_cast<uint32_t>(sourceLength * ratio);
     
@@ -452,10 +406,10 @@ std::unique_ptr<float[]> SampleLoader::resampleIfNeeded(
     return outputData;
 }
 
-// === Static Utility Methods ===
-
-juce::File SampleLoader::getDefaultInstrumentDirectory()
-{
+/**
+ * @brief Vrátí default instrument directory.
+ */
+juce::File SampleLoader::getDefaultInstrumentDirectory() {
     juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
     juce::File ithacaDir = appDataDir.getChildFile("IthacaPlayer");
     juce::File instrumentDir = ithacaDir.getChildFile("instrument");
@@ -466,38 +420,46 @@ juce::File SampleLoader::getDefaultInstrumentDirectory()
     return instrumentDir;
 }
 
-juce::String SampleLoader::generateFilename(uint8_t midiNote, uint8_t dynamicLevel)
-{
+/**
+ * @brief Vygeneruje název souboru.
+ */
+juce::String SampleLoader::generateFilename(uint8_t midiNote, uint8_t dynamicLevel, double sr) {
+    juce::String srSuffix = (std::abs(sr - 44100.0) < 1.0) ? "44" : "48";
     juce::String filename = "m" + juce::String(midiNote).paddedLeft('0', 3) + 
-                           "-vel" + juce::String(dynamicLevel) + ".lau";
+                           "-vel" + juce::String(dynamicLevel) + 
+                           "-" + srSuffix + ".wav";
     
     Logger::getInstance().log("SampleLoader/generateFilename", "debug",
                              "Vygenerován název souboru: " + filename + 
                              " pro notu " + juce::String((int)midiNote) + 
-                             ", vrstva " + juce::String((int)dynamicLevel));
+                             ", vrstva " + juce::String((int)dynamicLevel) +
+                             ", SR " + srSuffix);
     
     return filename;
 }
 
-bool SampleLoader::parseFilename(const juce::String& filename, uint8_t& midiNote, uint8_t& dynamicLevel)
-{
-    // Parse pattern: mXXX-velY.lau
-    if (!filename.startsWith("m") || !filename.endsWith(".lau")) {
+/**
+ * @brief Parsuje název souboru.
+ */
+bool SampleLoader::parseFilename(const juce::String& filename, uint8_t& midiNote, uint8_t& dynamicLevel, double& sr) {
+    if (!filename.startsWith("m") || !filename.endsWith(".wav")) {
         return false;
     }
     
-    int dashPos = filename.indexOf("-vel");
-    if (dashPos == -1) {
+    juce::StringArray parts = juce::StringArray::fromTokens(filename.upToLastOccurrenceOf(".wav", false, false), "-", "");
+    if (parts.size() != 3) {
         return false;
     }
     
-    juce::String noteStr = filename.substring(1, dashPos);
-    juce::String levelStr = filename.substring(dashPos + 4, filename.length() - 4);
+    juce::String noteStr = parts[0].substring(1);
+    juce::String levelStr = parts[1].substring(3);
+    juce::String srStr = parts[2];
     
     int note = noteStr.getIntValue();
     int level = levelStr.getIntValue();
+    sr = (srStr == "44") ? 44100.0 : (srStr == "48" ? 48000.0 : 0.0);
     
-    if (note < MIN_NOTE || note > MAX_NOTE || level < 0 || level >= NUM_DYNAMIC_LEVELS) {
+    if (note < MIN_NOTE || note > MAX_NOTE || level < 0 || level >= NUM_DYNAMIC_LEVELS || sr == 0.0) {
         return false;
     }
     
@@ -507,23 +469,27 @@ bool SampleLoader::parseFilename(const juce::String& filename, uint8_t& midiNote
     return true;
 }
 
-uint8_t SampleLoader::velocityToDynamicLevel(uint8_t velocity)
-{
-    // Map velocity 0-127 to dynamic level 0-7
+/**
+ * @brief Mapuje velocity na dynamic level.
+ */
+uint8_t SampleLoader::velocityToDynamicLevel(uint8_t velocity) {
     if (velocity == 0) return 0;
     return std::min(static_cast<uint8_t>(7), static_cast<uint8_t>((velocity - 1) / 16));
 }
 
-float SampleLoader::getDynamicAmplitude(uint8_t dynamicLevel)
-{
+/**
+ * @brief Vrátí amplitude pro dynamic level.
+ */
+float SampleLoader::getDynamicAmplitude(uint8_t dynamicLevel) {
     if (dynamicLevel >= NUM_DYNAMIC_LEVELS) {
         return DYNAMIC_AMPLITUDES[NUM_DYNAMIC_LEVELS - 1];
     }
     return DYNAMIC_AMPLITUDES[dynamicLevel];
 }
 
-double SampleLoader::getFrequencyForNote(uint8_t midiNote) const
-{
-    // Standardní formule A4=440Hz (MIDI 69)
+/**
+ * @brief Vrátí frekvenci pro MIDI notu.
+ */
+double SampleLoader::getFrequencyForNote(uint8_t midiNote) const {
     return 440.0 * std::pow(2.0, (static_cast<int>(midiNote) - 69) / 12.0);
 }
