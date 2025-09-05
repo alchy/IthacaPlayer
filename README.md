@@ -9,6 +9,12 @@
 
 WIN+R: %APPDATA%\IthacaPlayer  
 
+## Tail aplikacniho logu
+
+```
+Get-Content -Path C:\Users\nemej992\AppData\Roaming\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait
+```
+
 C:\Users\[uživatel]\AppData\Roaming\IthacaPlayer  
 
 Zde se ukládají generované WAV soubory pro samples (v podsložce "instrument"), logy a další data.

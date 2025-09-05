@@ -35,7 +35,7 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
 }
 
 /**
- * @brief Destruktor s kompletním cleanup a logováním.
+ * @brief Destruktor - NYU opravdu vymažeme samples
  */
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor() 
 {
@@ -48,7 +48,7 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
         
         logger_.log("PluginProcessor/destructor", "info", "Audio processing stopped");
         
-        // Uvolnění zdrojů v správném pořadí
+        // NYU opravdu uvolníme vzorky při destruktoru
         sampleLibrary_.clear();
         logger_.log("PluginProcessor/destructor", "info", "Sample library cleared");
         
@@ -184,7 +184,7 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
 }
 
 /**
- * @brief Uvolní zdroje s kompletním logováním.
+ * @brief Uvolní zdroje - OPTIMALIZACE: nemazat samples z paměti
  */
 void AudioPluginAudioProcessor::releaseResources()
 {
@@ -194,14 +194,16 @@ void AudioPluginAudioProcessor::releaseResources()
         // Okamžité zastavení zpracování
         processingEnabled_.store(false);
         
-        // Vyčištění vzorků
-        sampleLibrary_.clear();
-        logger_.log("PluginProcessor/releaseResources", "info", "Sample library cleared");
+        // OPTIMALIZACE: NEMAZAT samples z paměti
+        // Samples zůstávají v RAM pro rychlou reinicializaci
+        // sampleLibrary_.clear();  // <-- ZAKOMENTOVÁNO
         
-        // Reset stavu
+        logger_.log("PluginProcessor/releaseResources", "info", "Sample library kept in memory for fast restart");
+        
+        // Reset pouze stavu, ne dat
         synthState_.store(SynthState::Uninitialized);
         
-        logger_.log("PluginProcessor/releaseResources", "info", "All resources released");
+        logger_.log("PluginProcessor/releaseResources", "info", "All resources released (samples preserved)");
         
     } catch (const std::exception& e) {
         logger_.log("PluginProcessor/releaseResources", "error", "Error during release: " + juce::String(e.what()));
@@ -210,7 +212,7 @@ void AudioPluginAudioProcessor::releaseResources()
     }
     
     logger_.log("PluginProcessor/releaseResources", "info", "=== RELEASE RESOURCES COMPLETED ===");
-    DBG("Resources released");
+    DBG("Resources released (samples preserved in memory)");
 }
 
 /**
@@ -262,7 +264,7 @@ void AudioPluginAudioProcessor::initializeSynth()
 }
 
 /**
- * @brief Rychlá reinicializace bez regenerování samples (po releaseResources se stejným SR)
+ * @brief Skutečně rychlá reinicializace - samples už jsou v paměti
  */
 void AudioPluginAudioProcessor::initializeSynthFast()
 {
@@ -278,21 +280,7 @@ void AudioPluginAudioProcessor::initializeSynthFast()
             throw std::runtime_error("Sample rate not set");
         }
         
-        logger_.log("PluginProcessor/initializeSynthFast", "info", "Fast loading sample library from disk...");
-        
-        // OPTIMALIZACE: Rychlé načtení existujících samples z disku
-        // OPRAVA: Přidán komentář před nepoužívaný parametr status pro odstranění warning C4100
-        auto progressCallback = [this](int current, int total, const juce::String& /*status*/) {
-            // Redukované progress reporting
-            if (current % 100 == 0 || current == total) {
-                logger_.log("PluginProcessor/initializeSynthFast", "debug", 
-                           "Fast progress: " + juce::String(current) + "/" + juce::String(total));
-            }
-        };
-        
-        sampleLibrary_.initialize(sampleRate_, progressCallback);
-        
-        // Kontrola, zda byla inicializace úspěšná
+        // Kontrola, zda máme už samples v paměti
         bool hasValidSamples = false;
         for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
             for (uint8_t level = 0; level < 8; ++level) {
@@ -304,11 +292,46 @@ void AudioPluginAudioProcessor::initializeSynthFast()
             if (hasValidSamples) break;
         }
         
-        if (!hasValidSamples) {
-            throw std::runtime_error("No samples available after fast init");
+        if (hasValidSamples) {
+            // INSTANT: Samples už jsou v paměti!
+            logger_.log("PluginProcessor/initializeSynthFast", "info", 
+                       "Samples already in memory - INSTANT reinitialization (0ms)");
+            
+            synthState_.store(SynthState::Ready);
+            
+        } else {
+            // Fallback: Musíme načíst z disku
+            logger_.log("PluginProcessor/initializeSynthFast", "info", 
+                       "No samples in memory - loading from disk...");
+            
+            auto progressCallback = [this](int current, int total, const juce::String& /*status*/) {
+                if (current % 100 == 0 || current == total) {
+                    logger_.log("PluginProcessor/initializeSynthFast", "debug", 
+                               "Loading progress: " + juce::String(current) + "/" + juce::String(total));
+                }
+            };
+            
+            sampleLibrary_.initialize(sampleRate_, progressCallback);
+            
+            // Kontrola úspěšnosti
+            hasValidSamples = false;
+            for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
+                for (uint8_t level = 0; level < 8; ++level) {
+                    if (sampleLibrary_.isNoteAvailable(note, level)) {
+                        hasValidSamples = true;
+                        break;
+                    }
+                }
+                if (hasValidSamples) break;
+            }
+            
+            if (!hasValidSamples) {
+                throw std::runtime_error("No samples available after loading");
+            }
+            
+            synthState_.store(SynthState::Ready);
         }
         
-        synthState_.store(SynthState::Ready);
         logger_.log("PluginProcessor/initializeSynthFast", "info", "Fast synth reinitialization completed successfully");
         
     } catch (const std::exception& e) {
