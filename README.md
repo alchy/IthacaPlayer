@@ -9,15 +9,16 @@
 
 WIN+R: %APPDATA%\IthacaPlayer  
 
+C:\Users\[uživatel]\AppData\Roaming\IthacaPlayer  
+
+Zde se ukládají generované WAV soubory pro samples (v podsložce "instrument"), logy (IthacaPlayer.log) a další data.
+
 ## Tail aplikacniho logu
 
 ```
 Get-Content -Path C:\Users\nemej992\AppData\Roaming\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait
 ```
 
-C:\Users\[uživatel]\AppData\Roaming\IthacaPlayer  
-
-Zde se ukládají generované WAV soubory pro samples (v podsložce "instrument"), logy a další data.
 
 ## MIDI tools
 
@@ -81,7 +82,8 @@ AudioPluginAudioProcessor (Main Controller)
 │   └── SampleLoader (Loading/Generating/Resampling WAV)
 ├── MidiStateManager (MIDI Event Processing)
 ├── VoiceManager (Voice Allocation & Control)
-└── Logger (Debug & Monitoring with Circular Buffer)
+├── Logger (Debug & Monitoring with Circular Buffer)
+└── PluginEditor (GUI Interface with Logging)
 ```
 
 
@@ -124,11 +126,31 @@ AudioPluginAudioProcessor (Main Controller)
 - Zápis do souboru (IthacaPlayer.log v %APPDATA%).  
 - Podpora úrovní (info/debug/error/warn).  
 - Thread-safe s mutex.  
+- Integrace s GUI pro real-time display.  
 
 ### 6. PluginProcessor  
-
 **Účel:** Hlavní audio procesor (JUCE-based).  
 **Klíčové vlastnosti:**  
 - Robustní error handling s try-catch a recovery.  
 - Inicializace jen při změně sample rate/bufferu.  
 - Podpora VST3/AU/Standalone.  
+
+### 7. PluginEditor  
+**Účel:** GUI rozhraní pro debugging a monitoring.  
+**Klíčové vlastnosti:**  
+- Real-time log display s matrix theme (zelený text na tmavém pozadí, monospace font).  
+- Toggle tlačítko pro zapnutí/vypnutí logování.  
+- Tlačítko pro vyčištění logů.  
+- Gradient pozadí a nadpis pro lepší vizuál.  
+- Velikost okna: 1024x600 pro pohodlné čtení logů.  
+
+## Změny a Opravy  
+- Odstraněny warningy C4244 (explicitní casts pro MIDI hodnoty).  
+- Nahrazeno ScopedPointer unique_ptr (moderní C++).  
+- Přidána thread-safety (atomic, mutex pro fronty a stavy).  
+- Optimalizace: Kruhové buffery, fallback na nižší/vyšší dynamic levels.  
+- GUI vylepšení: Matrix styl, toggle/clear funkce, rozšířené logování při resize/paint.  
+- Známé limity: Generované samples jsou mono/sine (bez ADSR envelope), max polyfonie 16, žádná reálná modulace (pouze sine).  
+
+## Plánované Rozšíření  
+- ADSR envelope pro voices.  
