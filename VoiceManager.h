@@ -7,6 +7,8 @@
 #include "MidiStateManager.h"
 #include "Logger.h"
 
+// #define DEBUG_VOICE_MANAGER 1
+
 /**
  * @class SynthVoice
  * @brief Rozšířený voice renderer s podporou dynamic levels

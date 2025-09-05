@@ -245,6 +245,8 @@ void VoiceManager::generateAudio(float* buffer, int numSamples)
  */
 void VoiceManager::refresh()
 {
+    #ifdef DEBUG_VOICE_MANAGER
+
     ++refreshCounter_;
     
     // Reset voice stealing counter
@@ -257,6 +259,8 @@ void VoiceManager::refresh()
     if (refreshCounter_ % PERIODIC_LOG_INTERVAL == 0) {
         logPeriodicStatus();
     }
+
+    #endif
 }
 
 /**
