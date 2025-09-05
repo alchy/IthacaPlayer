@@ -9,7 +9,7 @@
 Param(
     # Pole adresářů k vyloučení (výchozí: DESIGNS, JUCE, build).
     # Soubory v těchto adresářích (nebo podadresářích) nebudou zahrnuty.
-    [string[]]$ExcludeDirectories = @("DESIGNS", "JUCE", "build")
+    [string[]]$ExcludeDirectories = @("DESIGNS", "JUCE", "build", "decorators")
 )
 
 # Konfigurace: Upravte pole $extensions pro přidání nebo odebrání typů souborů.

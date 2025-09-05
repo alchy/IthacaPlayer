@@ -4,6 +4,7 @@
         "shared_mutex": "cpp",
         "*.mm": "cpp",
         "vector": "cpp",
-        "array": "cpp"
+        "array": "cpp",
+        "atomic": "cpp"
     }
 }

@@ -1,8 +1,6 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
-#include <juce_gui_basics/juce_gui_basics.h>
-#include <juce_events/juce_events.h>
 #include <atomic>
 #include <mutex>
 #include <array>
@@ -10,8 +8,12 @@
 
 #define MAX_LOG_ENTRIES 100
 
-class AudioPluginAudioProcessorEditor;
-
+/**
+ * @class Logger
+ * @brief Singleton logger pro souborové logování (bez GUI závislosti).
+ * 
+ * Podporuje logování s časovým razítkem, závažností a komponentou. Refaktorováno: Odstraněna GUI aktualizace, zůstalo jen souborové logování pro debugging.
+ */
 class Logger
 {
 public:
@@ -20,11 +22,7 @@ public:
     void log(const juce::String& component, const juce::String& severity, const juce::String& message);
     static std::atomic<bool> loggingEnabled;
 
-    void setEditor(AudioPluginAudioProcessorEditor* ed);
-
-    juce::StringArray getLogBuffer() const;
     void clearLogs();
-    size_t getLogCount() const;
 
 private:
     Logger();
@@ -42,16 +40,9 @@ private:
 
     LogQueue logQueue_;
 
-    mutable std::mutex logMutex_;
-    mutable std::mutex editorMutex_;
+    mutable std::mutex logMutex_;  // Mutex pro queue
 
-    // Oprava: Použit unique_ptr místo deprecated ScopedPointer
-    AudioPluginAudioProcessorEditor* editorPtr_{nullptr};
+    std::unique_ptr<juce::FileLogger> fileLogger_;  // File logger pro souborový výstup
 
     void pushToLogQueue(const juce::String& logEntry);
-    juce::StringArray getCurrentLogs() const;
-    void scheduleGUIUpdate();
-
-    // Oprava: Použit unique_ptr místo deprecated ScopedPointer
-    std::unique_ptr<juce::FileLogger> fileLogger_;
 };

@@ -1,25 +1,22 @@
 #include "Logger.h"
-#include "PluginEditor.h"
 #include <sstream>
 
 std::atomic<bool> Logger::loggingEnabled{true};
 
 /**
  * @brief Konstruktor Logger.
- * Inicializuje singleton a přidává file logger.
- * Oprava: Použit unique_ptr místo deprecated ScopedPointer.
+ * Inicializuje singleton a file logger (umístění v app data složce).
  */
 Logger::Logger() {
-    // Oprava: Inicializace file loggeru (umístění v default app log složce)
+    // Inicializace file loggeru
     fileLogger_ = std::unique_ptr<juce::FileLogger>(
         juce::FileLogger::createDefaultAppLogger("IthacaPlayer", "IthacaPlayer.log", "Start IthacaPlayer logu", 0)
     );
-    DBG("Logger initialized.");  // Přidaný debug pro konzoli
 }
 
 /**
  * @brief Vrátí singleton instanci Logger.
- * @return Reference na instanci
+ * @return Reference na instanci.
  */
 Logger& Logger::getInstance()
 {
@@ -29,34 +26,32 @@ Logger& Logger::getInstance()
 
 /**
  * @brief Loguje zprávu s časovým razítkem, komponentou a závažností.
- * @param component Komponenta (např. třída/metoda)
- * @param severity Závažnost (info, debug, error, warn)
- * @param message Zpráva
- * Oprava: Přidán zápis do fileLogger, pokud existuje.
+ * Zapisuje jen do souboru (bez GUI).
+ * @param component Komponenta (např. třída/metoda).
+ * @param severity Závažnost (info, debug, error, warn).
+ * @param message Zpráva.
  */
 void Logger::log(const juce::String& component, const juce::String& severity, const juce::String& message)
 {
     if (!loggingEnabled.load(std::memory_order_relaxed))
         return;
 
-    try {
-        auto now = juce::Time::getCurrentTime();
-        juce::String timestamp = now.formatted("%Y-%m-%d %H:%M:%S");
-        juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
+    auto now = juce::Time::getCurrentTime();
+    juce::String timestamp = now.formatted("%Y-%m-%d %H:%M:%S");
+    juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
 
-        pushToLogQueue(logEntry);
-        scheduleGUIUpdate();
+    pushToLogQueue(logEntry);
 
-        // Oprava: Zápis do souboru, pokud fileLogger existuje
-        if (fileLogger_ != nullptr) {
-            fileLogger_->logMessage(logEntry);
-        }
-    } catch (...) {
-        // Bezpečný fallback při chybě
-        DBG("Logger error in log method.");  // Přidaný debug pro chyby
+    // Zápis do souboru
+    if (fileLogger_ != nullptr) {
+        fileLogger_->logMessage(logEntry);
     }
 }
 
+/**
+ * @brief Přidá log do queue (pro interní ukládání, pokud potřeba).
+ * @param logEntry Logovací záznam.
+ */
 void Logger::pushToLogQueue(const juce::String& logEntry)
 {
     std::lock_guard<std::mutex> lock(logMutex_);
@@ -80,43 +75,9 @@ void Logger::pushToLogQueue(const juce::String& logEntry)
     }
 }
 
-void Logger::setEditor(AudioPluginAudioProcessorEditor* ed)
-{
-    std::lock_guard<std::mutex> lock(editorMutex_);
-    editorPtr_ = ed;
-    DBG("Editor set in Logger.");  // Přidaný debug pro nastavení editoru
-}
-
-void Logger::scheduleGUIUpdate()
-{
-    juce::MessageManager::callAsync([this]() {
-        std::lock_guard<std::mutex> lock(editorMutex_);
-        if (editorPtr_ != nullptr) {
-            editorPtr_->updateLogDisplay();
-        }
-    });
-}
-
-juce::StringArray Logger::getLogBuffer() const
-{
-    return getCurrentLogs();
-}
-
-juce::StringArray Logger::getCurrentLogs() const
-{
-    std::lock_guard<std::mutex> lock(logMutex_);
-
-    juce::StringArray result;
-    uint8_t currentCount = logQueue_.count.load();
-    uint8_t readIndex = logQueue_.readIndex;
-
-    for (uint8_t i = 0; i < currentCount; ++i) {
-        uint8_t index = static_cast<uint8_t>(readIndex + i);
-        result.add(logQueue_.logs[index]);
-    }
-    return result;
-}
-
+/**
+ * @brief Vyčistí logy v queue.
+ */
 void Logger::clearLogs()
 {
     std::lock_guard<std::mutex> lock(logMutex_);
@@ -126,10 +87,4 @@ void Logger::clearLogs()
     for (auto& log : logQueue_.logs) {
         log = juce::String();
     }
-    DBG("Logs cleared.");  // Přidaný debug pro čištění logů
-}
-
-size_t Logger::getLogCount() const
-{
-    return logQueue_.count.load(std::memory_order_relaxed);
 }

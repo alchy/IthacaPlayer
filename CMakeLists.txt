@@ -39,7 +39,11 @@ target_sources(IthacaPlayer
         PluginEditor.h
         PluginEditor.cpp
         PluginProcessor.h
-        PluginProcessor.cpp)
+        PluginProcessor.cpp
+
+        # BinaryData pro embeddovaný obrázek
+        decorators/BinaryData.h
+        decorators/BinaryData.cpp)
 
 target_compile_definitions(IthacaPlayer
     PUBLIC

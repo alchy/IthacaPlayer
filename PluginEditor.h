@@ -1,30 +1,31 @@
 #pragma once
 
-#include "PluginProcessor.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "PluginProcessor.h"
 
-//==============================================================================
-class AudioPluginAudioProcessorEditor final : public juce::AudioProcessorEditor
+/**
+ * @class AudioPluginAudioProcessorEditor
+ * @brief Editor pluginu s jednoduchým GUI.
+ * 
+ * Obsahuje checkbox pro souborové logování a embedovaný obrázek.
+ * Logování do GUI bylo odstraněno, MIDI indikátor vynechán pro jednoduchost.
+ */
+class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
-    explicit AudioPluginAudioProcessorEditor (AudioPluginAudioProcessor&);
+    AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor&);
     ~AudioPluginAudioProcessorEditor() override;
 
-    //==============================================================================
-    void paint (juce::Graphics&) override;
+    void paint(juce::Graphics&) override;
     void resized() override;
 
-    // Metoda pro aktualizaci log display
-    void updateLogDisplay();
-
 private:
-    // Reference na procesor
-    AudioPluginAudioProcessor& processorRef;
+    AudioPluginAudioProcessor& audioProcessor;  // Reference na procesor
 
-    // Komponenty pro logování a ovládání
-    std::unique_ptr<juce::TextEditor> logDisplay;
-    std::unique_ptr<juce::ToggleButton> toggleLogging;
-    std::unique_ptr<juce::TextButton> clearLogsButton;
+    juce::ToggleButton loggingToggle{"Create file for debugging"};  // Checkbox pro logování do souboru
+    juce::Label logFilePathLabel;  // Label pro zobrazení relativní cesty k log souboru
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
+    juce::ImageComponent imageComponent;  // Komponenta pro embedovaný obrázek
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessorEditor)
 };
