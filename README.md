@@ -154,3 +154,99 @@ AudioPluginAudioProcessor (Main Controller)
 
 ## Plánované Rozšíření  
 - ADSR envelope pro voices.  
+
+
+## Binarni data
+
+v adresari decorators se nachazeji binarni data:
+
+decorators\BinaryData.cpp:
+
+```
+#include <cstring>
+
+namespace BinaryData
+{
+
+//================== ithaca-player-1.jpg ==================
+static const unsigned char temp_binary_data_0[] = {data}
+
+const char* ithacaplayer1_jpg = (const char*) temp_binary_data_0;
+
+
+const char* getNamedResource (const char* resourceNameUTF8, int& numBytes);
+const char* getNamedResource (const char* resourceNameUTF8, int& numBytes)
+{
+    unsigned int hash = 0;
+
+    if (resourceNameUTF8 != nullptr)
+        while (*resourceNameUTF8 != 0)
+            hash = 31 * hash + (unsigned int) *resourceNameUTF8++;
+
+    switch (hash)
+    {
+        case 0xa78fa890:  numBytes = 309202; return ithacaplayer1_jpg;
+        default: break;
+    }
+
+    numBytes = 0;
+    return nullptr;
+}
+
+const char* namedResourceList[] =
+{
+    "ithacaplayer1_jpg"
+};
+
+const char* originalFilenames[] =
+{
+    "ithaca-player-1.jpg"
+};
+
+const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8);
+const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8)
+{
+    for (unsigned int i = 0; i < (sizeof (namedResourceList) / sizeof (namedResourceList[0])); ++i)
+        if (strcmp (namedResourceList[i], resourceNameUTF8) == 0)
+            return originalFilenames[i];
+
+    return nullptr;
+}
+
+}
+```
+
+decorators\BinaryData.h:
+
+```
+/* =========================================================================================
+
+   This is an auto-generated file: Any edits you make may be overwritten!
+
+*/
+
+#pragma once
+
+namespace BinaryData
+{
+    extern const char*   ithacaplayer1_jpg;
+    const int            ithacaplayer1_jpgSize = 309202;
+
+    // Number of elements in the namedResourceList and originalFileNames arrays.
+    const int namedResourceListSize = 1;
+
+    // Points to the start of a list of resource names.
+    extern const char* namedResourceList[];
+
+    // Points to the start of a list of resource filenames.
+    extern const char* originalFilenames[];
+
+    // If you provide the name of one of the binary resource variables above, this function will
+    // return the corresponding data and its size (or a null pointer if the name isn't found).
+    const char* getNamedResource (const char* resourceNameUTF8, int& dataSizeInBytes);
+
+    // If you provide the name of one of the binary resource variables above, this function will
+    // return the corresponding original, non-mangled filename (or a null pointer if the name isn't found).
+    const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8);
+}
+```

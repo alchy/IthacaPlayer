@@ -1,6 +1,7 @@
+// PluginEditor.cpp - Opravená verze
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
-#include "decorators/BinaryData.h"  // Pro embedovaný obrázek (generováno Projucerem)
+#include "decorators/BinaryData.h"
 
 /**
  * @brief Konstruktor editoru.
@@ -10,27 +11,31 @@
 AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p)
 {
+    // Embedovaný obrázek z BinaryData (načtení a nastavení)
+    juce::Image image = juce::ImageCache::getFromMemory(BinaryData::ithacaplayer1_jpg, BinaryData::ithacaplayer1_jpgSize);
+    imageComponent.setImage(image);
+    imageComponent.setImagePlacement(juce::RectanglePlacement::stretchToFit);  // ✅ NOVÉ: Roztáhni na celou plochu
+    addAndMakeVisible(imageComponent);
+
     // Checkbox pro vytváření debug souboru (řídí logování do souboru)
     addAndMakeVisible(loggingToggle);
-    loggingToggle.setToggleState(true, juce::dontSendNotification);  // Výchozí stav: zapnuto
+    loggingToggle.setToggleState(true, juce::dontSendNotification);
     loggingToggle.onClick = [this] {
-        Logger::loggingEnabled.store(loggingToggle.getToggleState());  // Řídí zapnutí/vypnutí logování do souboru
+        Logger::loggingEnabled.store(loggingToggle.getToggleState());
     };
 
     // Label pro zobrazení relativní cesty k log souboru (cross-platform)
     addAndMakeVisible(logFilePathLabel);
     juce::File logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("IthacaPlayer");
     juce::File logFile = logDir.getChildFile("IthacaPlayer.log");
-    // Oprava cesty: Použijeme getParentDirectory() pro relativní cestu
     logFilePathLabel.setText(logFile.getParentDirectory().getFileName() + "/" + logFile.getFileName(), juce::dontSendNotification);
-    logFilePathLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+    logFilePathLabel.setColour(juce::Label::textColourId, juce::Colours::white);  // ✅ ZMĚNA: Bílý text pro lepší čitelnost
+    logFilePathLabel.setColour(juce::Label::backgroundColourId, juce::Colours::black.withAlpha(0.7f));  // ✅ NOVÉ: Polotransparentní pozadí
 
-    // Embedovaný obrázek z BinaryData (načtení a nastavení)
-    juce::Image image = juce::ImageCache::getFromMemory(BinaryData::ithacaplayer1_jpg, BinaryData::ithacaplayer1_jpgSize);
-    imageComponent.setImage(image);
-    addAndMakeVisible(imageComponent);
+    // ✅ NOVÉ: Nastav průhlednost checkboxu pro lepší vzhled
+    loggingToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
 
-    setSize(259, 443);  // Výchozí velikost okna editoru
+    setSize(400, 600);  // ✅ ZMĚNA: Zvětšená výchozí velikost okna
 }
 
 /**
@@ -48,21 +53,27 @@ AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
  */
 void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-    g.setColour(juce::Colours::white);
-    g.setFont(14.0f);
-    g.drawFittedText("IthacaPlayer Editor", getLocalBounds(), juce::Justification::centredTop, 1);
+    // ✅ ZMĚNA: Žádné pozadí - necháme obrázek jako pozadí
+    // g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
+    
+    // ✅ NOVÉ: Volitelně můžeme přidat tlumený overlay pro lepší čitelnost textu
+    g.setColour(juce::Colours::black.withAlpha(0.1f));
+    g.fillRect(getLocalBounds().removeFromTop(80));  // Jen horní část pro controls
 }
 
 /**
- * @brief Resized - nastaví pozice komponent v GUI.
+ * @brief Resized - nastavuje pozice komponent v GUI.
  */
 void AudioPluginAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
     
-    loggingToggle.setBounds(10, 10, 200, 24);  // Pozice checkboxu nahoře
-    logFilePathLabel.setBounds(10, 40, 300, 24);  // Pozice labelu pod checkboxem
+    // ✅ KLÍČOVÁ ZMĚNA: Obrázek zabírá celou plochu
+    imageComponent.setBounds(bounds);
     
-    imageComponent.setBounds(10, 70, 380, 200);  // Obrázek dole (upravte velikost podle obrázku)
+    // ✅ ZMĚNA: Controls jsou overlay přes obrázek
+    auto controlArea = bounds.removeFromTop(80).reduced(10);
+    
+    loggingToggle.setBounds(controlArea.removeFromTop(24));
+    logFilePathLabel.setBounds(controlArea.removeFromTop(24));
 }
