@@ -5,7 +5,7 @@
 [build]   IthacaPlayer_VST3.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3  
 [build]   IthacaPlayer_Standalone.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe  
 
-## Cesta na aplikacni data
+## Cesta na aplikační data
 
 WIN+R: %APPDATA%\IthacaPlayer  
 
@@ -13,12 +13,11 @@ C:\Users\[uživatel]\AppData\Roaming\IthacaPlayer
 
 Zde se ukládají generované WAV soubory pro samples (v podsložce "instrument"), logy (IthacaPlayer.log) a další data.
 
-## Tail aplikacniho logu
+## Tail aplikačního logu
 
 ```
 Get-Content -Path C:\Users\nemej992\AppData\Roaming\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait
 ```
-
 
 ## MIDI tools
 
@@ -70,7 +69,7 @@ Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) prov
 
 # IthacaPlayer - Software Synthesizer  
 
-Audio plugin synthesizer implementovaný v JUCE frameworku, inspirovaný hardwarovými syntezátory s modulární architekturou. Podporuje MIDI vstup, generování audio samplů (fallback na sine vlny), dynamic levels (0-7) pro velocity mapping a stereo samples.  
+Audio plugin synthesizer implementovaný v JUCE frameworku s modulární architekturou a pokročilým voice managementem. Podporuje MIDI vstup, generování audio samplů (fallback na sine vlny), dynamic levels (0-7) pro velocity mapping a ADSR-ready voice systém.
 
 ## Architektura Systému  
 
@@ -80,12 +79,11 @@ Audio plugin synthesizer implementovaný v JUCE frameworku, inspirovaný hardwar
 AudioPluginAudioProcessor (Main Controller)
 ├── SampleLibrary (Pre-computed Audio Storage)
 │   └── SampleLoader (Loading/Generating/Resampling WAV)
-├── MidiStateManager (MIDI Event Processing)
-├── VoiceManager (Voice Allocation & Control)
+├── MidiStateManager (MIDI Event Processing - Thread-Safe)
+├── VoiceManager (Advanced Voice Allocation & ADSR-Ready)
 ├── Logger (Debug & Monitoring with Circular Buffer)
-└── PluginEditor (GUI Interface with Logging)
+└── PluginEditor (GUI Interface with Full-Screen Image)
 ```
-
 
 ## Core Komponenty  
 
@@ -95,158 +93,172 @@ AudioPluginAudioProcessor (Main Controller)
 - Automatické generování sine vln jako fallback.  
 - Ukládání/resampling WAV souborů do %APPDATA%\IthacaPlayer\instrument\ (podpora 44.1kHz a 48kHz).  
 - Velocity mapping na dynamic levels (0-7).  
-- Podpora mono/stereo samplů.  
+- Podpora mono/stereo samplů s inteligentním fallback.  
 
 ### 2. SampleLoader  
-**Účel:** Načítání/generování samplů s resamplingem.  
+**Účel:** Načítání/generování samplů s resamplingem a robustním error handlingem.  
 **Klíčové vlastnosti:**  
 - Naming convention: m[nota]-vel[level]-[sr].wav (např. m060-vel3-44.wav).  
 - Fallback: Pokud soubor chybí, generuje sine pro 44.1kHz, resampluje na 48kHz a ukládá.  
+- Spiral search pro dynamic levels s fallback na nižší/vyšší úrovně.  
 - Statistiky loadingu (načtené/generované soubory, paměť).  
 
-### 3. MidiStateManager  
-**Účel:** Správa MIDI stavu (noty, velocity, controllery).  
+### 3. MidiStateManager (Opraveno)
+**Účel:** Thread-safe správa MIDI stavu (noty, velocity, controllery).  
 **Klíčové vlastnosti:**  
-- Kruhové fronty pro note-on/off (thread-safe s mutex a atomic).  
-- Inicializace default controller hodnot (např. volume=100).  
-- Podpora 16 kanálů.  
+- **Thread-safe circular buffers** s mutex protection a atomic operacemi.  
+- **Overflow handling** - automatické přepisování nejstarších záznamů.  
+- **Robustní validace** všech MIDI vstupů s graceful error handling.  
+- Inicializace standard controller hodnot (volume=100, pan=64, sustain=0).  
+- Podpora 16 kanálů s kompletní error protection.  
 
-### 4. VoiceManager  
-**Účel:** Alokace a kontrola hlasů (polyfonie).  
+### 4. VoiceManager (Kompletně refaktorován)
+**Účel:** Pokročilý voice management s ADSR-ready architekturou.  
 **Klíčové vlastnosti:**  
-- Až 16 hlasů s dynamic level selection.  
-- Enhanced voice stealing (nejstarší hlas s nejvyšším progressem).  
-- Stereo rendering (mix/duplicate kanálů).  
-- Statistiky: Aktivní hlasy, podle levels, průměrný progress, stolen voices.  
+- **Voice State Management**: Inactive/Playing/Release states s automatickým lifecycle.  
+- **Intelligent Voice Allocation**:
+  1. Note restart detection (monofonie per nota)
+  2. Free voice allocation (nejlepší dostupná)
+  3. Release voice stealing (preferované)
+  4. Playing voice stealing (last resort)
+- **Release Counter System**: Minimalistická implementace s časovým limitem (100ms).  
+- **Priority Queue Management**: Sophisticated priorita pro voice stealing.  
+- **Comprehensive Statistics**: Real-time monitoring všech voice states.  
+- **Stereo/Mono Rendering**: Optimalizované audio rendering s mix/duplicate logiku.  
 
-### 5. Logger  
-**Účel:** Logování s kruhovým bufferem a GUI display.  
+### 5. Logger (Stabilizován)
+**Účel:** Thread-safe logování s kruhovým bufferem.  
 **Klíčové vlastnosti:**  
-- Kruhový buffer (100 vstupů) pro efektivní paměť.  
-- Zápis do souboru (IthacaPlayer.log v %APPDATA%).  
-- Podpora úrovní (info/debug/error/warn).  
-- Thread-safe s mutex.  
-- Integrace s GUI pro real-time display.  
+- Kruhový buffer (100 vstupů) s overflow protection.  
+- Zápis do souboru (IthacaPlayer.log v %APPDATA%) s rotací.  
+- Podpora úrovní (info/debug/error/warn) s intelligent filtering.  
+- Thread-safe s mutex protection.  
+- English debug messages, české komentáře.  
 
-### 6. PluginProcessor  
-**Účel:** Hlavní audio procesor (JUCE-based).  
+### 6. PluginProcessor (Robustní)
+**Účel:** Hlavní audio procesor s enhanced error handling.  
 **Klíčové vlastnosti:**  
-- Robustní error handling s try-catch a recovery.  
-- Inicializace jen při změně sample rate/bufferu.  
-- Podpora VST3/AU/Standalone.  
+- **Robustní MIDI validation** s range checking a error recovery.  
+- **Thread-safe initialization** jen při změně sample rate/bufferu.  
+- **Graceful error handling** s try-catch protection.  
+- Podpora VST3/AU/Standalone formátů.  
 
-### 7. PluginEditor  
-**Účel:** GUI rozhraní pro debugging a monitoring.  
+### 7. PluginEditor (Vylepšeno)
+**Účel:** GUI rozhraní s full-screen image support.  
 **Klíčové vlastnosti:**  
-- Real-time log display s matrix theme (zelený text na tmavém pozadí, monospace font).  
+- **Full-screen background image** s stretch-to-fit scaling.  
+- **Overlay controls** s transparentním pozadím pro lepší čitelnost.  
 - Toggle tlačítko pro zapnutí/vypnutí logování.  
-- Tlačítko pro vyčištění logů.  
-- Gradient pozadí a nadpis pro lepší vizuál.  
-- Velikost okna: 1024x600 pro pohodlné čtení logů.  
+- Bílý text s semi-transparentním pozadím pro kontrast.  
+- Zvětšená velikost okna (400x600) pro lepší UX.  
 
-## Změny a Opravy  
-- Odstraněny warningy C4244 (explicitní casts pro MIDI hodnoty).  
-- Nahrazeno ScopedPointer unique_ptr (moderní C++).  
-- Přidána thread-safety (atomic, mutex pro fronty a stavy).  
-- Optimalizace: Kruhové buffery, fallback na nižší/vyšší dynamic levels.  
-- GUI vylepšení: Matrix styl, toggle/clear funkce, rozšířené logování při resize/paint.  
-- Známé limity: Generované samples jsou mono/sine (bez ADSR envelope), max polyfonie 16, žádná reálná modulace (pouze sine).  
+## ADSR Koncept a Budoucí Rozšíření
 
-## Plánované Rozšíření  
-- ADSR envelope pro voices.  
+### Aktuální implementace: Release Counter
+- **Minimalistická varianta** pro rychlé testování a stabilizaci.
+- **Release timer**: 100ms (4800 samples @ 48kHz) bez fade-out.
+- **Automatické cleanup**: Voices se uvolňují po vypršení release času.
+- **Thread-safe lifecycle**: Smooth přechody mezi voice states.
 
+### Plánovaná ADSR architektura
+```cpp
+// Budoucí modulární design:
+class ADSREnvelope {
+    // Separátní ADSR logika
+    EnvelopePhase: Attack/Decay/Sustain/Release
+    Parameters: attackTime, decayTime, sustainLevel, releaseTime
+    Exponenciální decay algoritmus (násobení 0.99, 0.98...)
+};
+
+// Integrace do SynthVoice:
+- Block-based decay s konfigurovatelným koeficientem
+- Per-sample nebo per-block aplikace envelope
+- Modulární použití pro amplitude/filter/pitch modulation
+```
+
+### Navržené varianty implementace:
+1. **Block-based decay**: Konstantní gain per block s exponenciálním decay
+2. **Per-sample envelope**: Přesnější ale CPU náročnější
+3. **Hybrid approach**: Kompromis mezi kvalitou a výkonem
+
+## Kritické opravy a vylepšení
+
+### Stability fixes:
+- **Circular buffer overflow** - opravena logika v MidiStateManager
+- **Race conditions** - eliminovány v voice allocation
+- **Memory safety** - robustní null pointer checks
+- **Voice lifecycle** - automatické cleanup release voices
+
+### Performance optimalizace:
+- **Intelligent voice stealing** preferuje release voices před playing
+- **Spiral search fallback** pro dynamic levels
+- **Cached statistics** pro real-time monitoring
+- **Reduced logging noise** s batch processing
+
+### Audio kvalita:
+- **Stereo/mono handling** - všechny kombinace správně ošetřeny
+- **Sample rate flexibility** - podpora 44.1kHz i 48kHz
+- **Dynamic level mapping** - přirozené chování podle velocity
+
+## Známé limity a plánovaná rozšíření
+
+### Současné limity:
+- Generované samples jsou mono sine vlny (bez harmonických)
+- Release fáze bez fade-out (jen časový limit)
+- Maximální polyfonie 16 voices
+- Žádná reálná modulace (LFO, filter)
+
+### Plánovaná rozšíření:
+- **Plný ADSR envelope systém** s konfigurovatelnou křivkou
+- **Filter section** s cutoff/resonance modulation
+- **LFO system** pro vibrato/tremolo efekty
+- **Multi-sample support** pro realistické nástroje
+- **Effects chain** (reverb, delay, chorus)
 
 ## Binarni data
 
-v adresari decorators se nachazeji binarni data:
+V adresáři decorators se nacházejí binary data pro GUI:
 
-decorators\BinaryData.cpp:
+- **BinaryData.h/.cpp**: Auto-generované soubory obsahující embedovaný obrázek
+- **ithaca-player-1.jpg**: Background image (309202 bytes)
+- **Full-screen scaling**: Automatické roztažení na celou plochu GUI
 
-```
-#include <cstring>
+## Development notes
 
-namespace BinaryData
-{
+### Testing workflow:
+1. Použijte VMPK + loopMIDI pro MIDI testování
+2. Sledujte real-time log: `Get-Content -Path %APPDATA%\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait`
+3. Monitorujte voice allocation v debug výstupu
+4. Testujte voice stealing při > 16 simultánních notách
 
-//================== ithaca-player-1.jpg ==================
-static const unsigned char temp_binary_data_0[] = {data}
+### Debug priorities:
+- Voice state transitions (Playing → Release → Inactive)
+- MIDI validation a overflow handling
+- Memory usage při loading velkých sample sad
+- Audio quality při voice stealing
 
-const char* ithacaplayer1_jpg = (const char*) temp_binary_data_0;
+Projekt je připraven pro ADSR implementaci s modulární architekturou.
+
+---
+
+# Poznamky k build JUCE
+
+https://cmake.org/download/
+https://trirpi.github.io/posts/developing-audio-plugins-with-juce-and-visual-studio-code/
 
 
-const char* getNamedResource (const char* resourceNameUTF8, int& numBytes);
-const char* getNamedResource (const char* resourceNameUTF8, int& numBytes)
-{
-    unsigned int hash = 0;
+# pridani JUCE
+- git submodule add https://github.com/juce-framework/JUCE.git JUCE
 
-    if (resourceNameUTF8 != nullptr)
-        while (*resourceNameUTF8 != 0)
-            hash = 31 * hash + (unsigned int) *resourceNameUTF8++;
+cd JUCE
+cmake -B build
+cmake -B build -DJUCE_BUILD_EXTRAS=ON
+cmake --build build --target AudioPluginHost
 
-    switch (hash)
-    {
-        case 0xa78fa890:  numBytes = 309202; return ithacaplayer1_jpg;
-        default: break;
-    }
+# Visual Studio Code
 
-    numBytes = 0;
-    return nullptr;
-}
+Build the Project 
+- Terminal > Run Build Task (or press Ctrl+Shift+B)
 
-const char* namedResourceList[] =
-{
-    "ithacaplayer1_jpg"
-};
-
-const char* originalFilenames[] =
-{
-    "ithaca-player-1.jpg"
-};
-
-const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8);
-const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8)
-{
-    for (unsigned int i = 0; i < (sizeof (namedResourceList) / sizeof (namedResourceList[0])); ++i)
-        if (strcmp (namedResourceList[i], resourceNameUTF8) == 0)
-            return originalFilenames[i];
-
-    return nullptr;
-}
-
-}
-```
-
-decorators\BinaryData.h:
-
-```
-/* =========================================================================================
-
-   This is an auto-generated file: Any edits you make may be overwritten!
-
-*/
-
-#pragma once
-
-namespace BinaryData
-{
-    extern const char*   ithacaplayer1_jpg;
-    const int            ithacaplayer1_jpgSize = 309202;
-
-    // Number of elements in the namedResourceList and originalFileNames arrays.
-    const int namedResourceListSize = 1;
-
-    // Points to the start of a list of resource names.
-    extern const char* namedResourceList[];
-
-    // Points to the start of a list of resource filenames.
-    extern const char* originalFilenames[];
-
-    // If you provide the name of one of the binary resource variables above, this function will
-    // return the corresponding data and its size (or a null pointer if the name isn't found).
-    const char* getNamedResource (const char* resourceNameUTF8, int& dataSizeInBytes);
-
-    // If you provide the name of one of the binary resource variables above, this function will
-    // return the corresponding original, non-mangled filename (or a null pointer if the name isn't found).
-    const char* getNamedResourceOriginalFilename (const char* resourceNameUTF8);
-}
-```
+Run Without Debugging 
+- 
