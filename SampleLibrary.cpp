@@ -48,13 +48,13 @@ void SampleLibrary::initialize(double sampleRate,
                        "Created instrument directory: " + instrumentDir.getFullPathName());
         }
 
-        // Progress callback wrapper
+        // Progress callback wrapper s redukovaným loggingem
         auto progressWrapper = [this, progressCallback](int current, int total, const juce::String& status) {
             if (progressCallback) {
                 progressCallback(current, total, status);
             }
-            // Log every 50th sample to reduce noise
-            if (current % 50 == 0 || current == total) {
+            // Log pouze každý 100. sample pro snížení noise
+            if (current % 100 == 0 || current == total) {
                 logger_.log("SampleLibrary/initialize", "debug", 
                            "Progress: " + juce::String(current) + "/" + juce::String(total) + 
                            " - " + status);
@@ -205,7 +205,7 @@ bool SampleLibrary::isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const
 }
 
 /**
- * @brief Stores loaded sample into RAM-based internal structure
+ * @brief Stores loaded sample into RAM-based internal structure s redukovaným loggingem
  */
 void SampleLibrary::storeSampleRam(const LoadedSample& sample)
 {
@@ -232,12 +232,16 @@ void SampleLibrary::storeSampleRam(const LoadedSample& sample)
     bool isStereo = (sample.numChannels == 2);
     segment.storeLayer(sample.dynamicLevel, std::move(dataCopy), sample.lengthSamples, isStereo);
     
-    logger_.log("SampleLibrary/storeSampleRam", "debug",
-               "Stored sample in RAM - note " + juce::String((int)sample.midiNote) + 
-               " level " + juce::String((int)sample.dynamicLevel) + 
-               " (" + juce::String(sample.lengthSamples) + " samples, " +
-               juce::String(isStereo ? "stereo" : "mono") + ", " +
-               juce::String(sample.isGenerated ? "generated" : "loaded") + ")");
+    // OPRAVA: Drasticky redukované logging - pouze každých 200 samples
+    static int storeCounter = 0;
+    if (++storeCounter % 200 == 0) {
+        logger_.log("SampleLibrary/storeSampleRam", "debug",
+                   "Batch stored " + juce::String(storeCounter) + " samples in RAM " +
+                   "(latest: note " + juce::String((int)sample.midiNote) + 
+                   " level " + juce::String((int)sample.dynamicLevel) + 
+                   ", " + juce::String(sample.lengthSamples) + " samples, " +
+                   juce::String(isStereo ? "stereo" : "mono") + ")");
+    }
 }
 
 /**

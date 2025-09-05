@@ -11,7 +11,7 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
     , logger_(Logger::getInstance())
     , voiceManager_(sampleLibrary_)  // VoiceManager vyžaduje SampleLibrary
 {
-    logger_.log("PluginProcessor/constructor", "info", "=== ZAHÁJENÍ INICIALIZACE PROCESSOR ===");
+    logger_.log("PluginProcessor/constructor", "info", "=== STARTING PROCESSOR INITIALIZATION ===");
     
     try {
         // Inicializace s bezpečnými výchozími hodnotami
@@ -19,18 +19,18 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
         synthState_.store(SynthState::Uninitialized);
         processingEnabled_.store(false);
         
-        logger_.log("PluginProcessor/constructor", "info", "Základní komponenty inicializovány");
-        logger_.log("PluginProcessor/constructor", "info", "Výchozí sample rate: " + juce::String(sampleRate_));
+        logger_.log("PluginProcessor/constructor", "info", "Basic components initialized");
+        logger_.log("PluginProcessor/constructor", "info", "Default sample rate: " + juce::String(sampleRate_));
         
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/constructor", "error", "Chyba v konstruktoru: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/constructor", "error", "Error in constructor: " + juce::String(e.what()));
         synthState_.store(SynthState::Error);
     } catch (...) {
-        logger_.log("PluginProcessor/constructor", "error", "Neznámá chyba v konstruktoru");
+        logger_.log("PluginProcessor/constructor", "error", "Unknown error in constructor");
         synthState_.store(SynthState::Error);
     }
     
-    logger_.log("PluginProcessor/constructor", "info", "=== PROCESSOR KONSTRUKTOR DOKONČEN ===");
+    logger_.log("PluginProcessor/constructor", "info", "=== PROCESSOR CONSTRUCTOR COMPLETED ===");
     DBG("Processor constructor completed with state: " + getStateDescription());
 }
 
@@ -39,82 +39,87 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
  */
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor() 
 {
-    logger_.log("PluginProcessor/destructor", "info", "=== ZAHÁJENÍ DESTRUKCE PROCESSOR ===");
+    logger_.log("PluginProcessor/destructor", "info", "=== STARTING PROCESSOR DESTRUCTION ===");
     
     try {
         // Okamžité zastavení zpracování
         processingEnabled_.store(false);
         synthState_.store(SynthState::Uninitialized);
         
-        logger_.log("PluginProcessor/destructor", "info", "Audio zpracování zastaveno");
+        logger_.log("PluginProcessor/destructor", "info", "Audio processing stopped");
         
         // Uvolnění zdrojů v správném pořadí
         sampleLibrary_.clear();
-        logger_.log("PluginProcessor/destructor", "info", "Sample library vyčištěna");
+        logger_.log("PluginProcessor/destructor", "info", "Sample library cleared");
         
         // Krátké čekání pro dokončení případných audio vláken
         juce::Thread::sleep(10);
         
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/destructor", "error", "Chyba v destruktoru: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/destructor", "error", "Error in destructor: " + juce::String(e.what()));
     } catch (...) {
-        logger_.log("PluginProcessor/destructor", "error", "Neznámá chyba v destruktoru");
+        logger_.log("PluginProcessor/destructor", "error", "Unknown error in destructor");
     }
     
-    logger_.log("PluginProcessor/destructor", "info", "=== DESTRUKCE PROCESSOR DOKONČENA ===");
+    logger_.log("PluginProcessor/destructor", "info", "=== PROCESSOR DESTRUCTION COMPLETED ===");
     DBG("Processor destructor completed");
 }
 
 void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    logger_.log("PluginProcessor/prepareToPlay", "info", "=== ZAHÁJENÍ PREPARE TO PLAY ===");
+    logger_.log("PluginProcessor/prepareToPlay", "info", "=== PREPARE TO PLAY START ===");
     logger_.log("PluginProcessor/prepareToPlay", "info", 
-                "Parametry - SampleRate: " + juce::String(sampleRate) + 
+                "Parameters - SampleRate: " + juce::String(sampleRate) + 
                 ", BufferSize: " + juce::String(samplesPerBlock));
     
     try {
         // Validace vstupních parametrů
         if (sampleRate <= 0.0 || sampleRate > 192000.0) {
-            logger_.log("PluginProcessor/prepareToPlay", "error", "Neplatný sample rate: " + juce::String(sampleRate));
-            throw std::invalid_argument(("Neplatný sample rate: " + juce::String(sampleRate)).toStdString());
+            logger_.log("PluginProcessor/prepareToPlay", "error", "Invalid sample rate: " + juce::String(sampleRate));
+            throw std::invalid_argument(("Invalid sample rate: " + juce::String(sampleRate)).toStdString());
         }
         
         if (samplesPerBlock <= 0 || samplesPerBlock > 8192) {
-            logger_.log("PluginProcessor/prepareToPlay", "error", "Neplatná velikost bufferu: " + juce::String(samplesPerBlock));
-            throw std::invalid_argument(("Neplatná velikost bufferu: " + juce::String(samplesPerBlock)).toStdString());
+            logger_.log("PluginProcessor/prepareToPlay", "error", "Invalid buffer size: " + juce::String(samplesPerBlock));
+            throw std::invalid_argument(("Invalid buffer size: " + juce::String(samplesPerBlock)).toStdString());
         }
         
         // Uložení starých hodnot pro porovnání
         double oldSampleRate = sampleRate_;
         int oldBufferSize = samplesPerBlock_;
+        SynthState oldState = synthState_.load();
         
         // Uložení nových parametrů
         sampleRate_ = sampleRate;
         samplesPerBlock_ = samplesPerBlock;
         
-        // Detekce změn (po uložení nových hodnot)
+        // OPRAVA: Detekce změn (po uložení nových hodnot) - odstranění unused isFirstInit
         bool sampleRateChanged = (std::abs(sampleRate - oldSampleRate) > 1.0);
         bool bufferSizeChanged = (samplesPerBlock != oldBufferSize);
-        bool isFirstInit = (synthState_.load() == SynthState::Uninitialized);
-        bool hasError = (synthState_.load() == SynthState::Error);
+        bool hasError = (oldState == SynthState::Error);
+        
+        // KLÍČOVÁ OPRAVA: Rozlišit "první init po startu" vs "reinit po releaseResources"
+        bool isInitAfterRelease = (oldState == SynthState::Uninitialized && oldSampleRate > 0);
+        bool isTrueFirstInit = (oldState == SynthState::Uninitialized && oldSampleRate == 0);
         
         logger_.log("PluginProcessor/prepareToPlay", "info", 
-                   "Změny - SampleRate: " + juce::String(sampleRateChanged ? "ANO" : "NE") + 
+                   "Changes - SampleRate: " + juce::String(sampleRateChanged ? "YES" : "NO") + 
                    " (" + juce::String(oldSampleRate) + " -> " + juce::String(sampleRate) + ")" +
-                   ", BufferSize: " + juce::String(bufferSizeChanged ? "ANO" : "NE") + 
+                   ", BufferSize: " + juce::String(bufferSizeChanged ? "YES" : "NO") + 
                    " (" + juce::String(oldBufferSize) + " -> " + juce::String(samplesPerBlock) + ")" +
-                   ", FirstInit: " + juce::String(isFirstInit ? "ANO" : "NE") + 
-                   ", HasError: " + juce::String(hasError ? "ANO" : "NE"));
+                   ", TrueFirstInit: " + juce::String(isTrueFirstInit ? "YES" : "NO") + 
+                   ", InitAfterRelease: " + juce::String(isInitAfterRelease ? "YES" : "NO") +
+                   ", HasError: " + juce::String(hasError ? "YES" : "NO"));
         
-        // OPRAVA: Reinicializace pouze když je skutečně potřeba (POUZE sample rate nebo první init/error)
-        bool needsFullReinit = isFirstInit || hasError || sampleRateChanged;
+        // KRITICKÁ OPRAVA: Reinicializace pouze když je skutečně potřeba
+        bool needsFullReinit = isTrueFirstInit || hasError || sampleRateChanged;
         
         if (needsFullReinit) {
             logger_.log("PluginProcessor/prepareToPlay", "info", 
-                       "Provádím PLNOU reinicializaci - důvod: " + 
-                       juce::String(isFirstInit ? "první inicializace" : 
-                                   hasError ? "chybový stav" : 
-                                   sampleRateChanged ? "změna sample rate" : "neznámý"));
+                       "Performing FULL reinitialization - reason: " + 
+                       juce::String(isTrueFirstInit ? "true first init" : 
+                                   hasError ? "error state" : 
+                                   sampleRateChanged ? "sample rate change" : "unknown"));
             
             // Dočasné zastavení zpracování
             processingEnabled_.store(false);
@@ -123,48 +128,56 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
             // Plná reinicializace (vzorky, voice manager, atd.)
             initializeSynth();
             
+        } else if (isInitAfterRelease && !sampleRateChanged) {
+            logger_.log("PluginProcessor/prepareToPlay", "info", 
+                       "OPTIMIZED reinitialization after releaseResources - same sample rate " + 
+                       juce::String(sampleRate) + ", only restoring state");
+            
+            // OPTIMALIZACE: Po releaseResources se stejným sample rate nemusíme regenerovat samples!
+            // Samples jsou již na disku, jen obnovíme stav
+            synthState_.store(SynthState::Initializing);
+            processingEnabled_.store(false);
+            
+            // Rychlá reinicializace bez generování samples
+            initializeSynthFast();
+            
         } else if (bufferSizeChanged) {
             logger_.log("PluginProcessor/prepareToPlay", "info", 
-                       "Změna POUZE velikosti bufferu z " + juce::String(oldBufferSize) + 
-                       " na " + juce::String(samplesPerBlock) + 
-                       " - ŽÁDNÁ reinicializace vzorků není potřeba, pouze update interních bufferů");
+                       "Buffer size change ONLY from " + juce::String(oldBufferSize) + 
+                       " to " + juce::String(samplesPerBlock) + 
+                       " - NO sample reinitialization needed");
             
             // OPRAVA: Pro změnu buffer size nepotřebujeme reinicializovat samples!
-            // Audio engine JUCE si sám spravuje buffery, my jen logujeme změnu
-            // Případně zde můžeme aktualizovat pouze interní buffery VoiceManageru apod.
-            
-            // Pokud VoiceManager má nějaké interní buffery závislé na buffer size, aktualizujeme je zde
-            // voiceManager_.updateBufferSize(samplesPerBlock); // Pokud by to bylo potřeba
+            // Audio engine JUCE si sám spravuje buffery
             
         } else {
             logger_.log("PluginProcessor/prepareToPlay", "info", 
-                       "Žádné změny nevyžadují akci - stav zůstává: " + getStateDescription());
+                       "No changes require action - state remains: " + getStateDescription());
         }
         
         // Povolení zpracování pouze pokud je vše v pořádku
         if (synthState_.load() == SynthState::Ready) {
             processingEnabled_.store(true);
-            logger_.log("PluginProcessor/prepareToPlay", "info", "Audio zpracování povoleno");
-        } else if (!needsFullReinit) {
-            // Pokud nebyla reinicializace a přesto není Ready, je problém
+            logger_.log("PluginProcessor/prepareToPlay", "info", "Audio processing enabled");
+        } else if (!needsFullReinit && !isInitAfterRelease) {
             logger_.log("PluginProcessor/prepareToPlay", "warn", 
-                       "Neočekávaný stav po změně bufferu: " + getStateDescription());
+                       "Unexpected state after buffer change: " + getStateDescription());
         }
         
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/prepareToPlay", "error", "Chyba v prepareToPlay: " + juce::String(e.what()));
-        handleSynthError("Chyba v prepareToPlay: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/prepareToPlay", "error", "Error in prepareToPlay: " + juce::String(e.what()));
+        handleSynthError("Error in prepareToPlay: " + juce::String(e.what()));
         synthState_.store(SynthState::Error);
         processingEnabled_.store(false);
     } catch (...) {
-        logger_.log("PluginProcessor/prepareToPlay", "error", "Neznámá chyba v prepareToPlay");
-        handleSynthError("Neznámá chyba v prepareToPlay");
+        logger_.log("PluginProcessor/prepareToPlay", "error", "Unknown error in prepareToPlay");
+        handleSynthError("Unknown error in prepareToPlay");
         synthState_.store(SynthState::Error);
         processingEnabled_.store(false);
     }
     
     logger_.log("PluginProcessor/prepareToPlay", "info", 
-               "=== PREPARE TO PLAY DOKONČEN - Stav: " + getStateDescription() + 
+               "=== PREPARE TO PLAY COMPLETED - State: " + getStateDescription() + 
                ", SampleRate: " + juce::String(sampleRate_) + 
                ", BufferSize: " + juce::String(samplesPerBlock_) + " ===");
     DBG("prepareToPlay completed with state: " + getStateDescription());
@@ -175,7 +188,7 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
  */
 void AudioPluginAudioProcessor::releaseResources()
 {
-    logger_.log("PluginProcessor/releaseResources", "info", "=== ZAHÁJENÍ RELEASE RESOURCES ===");
+    logger_.log("PluginProcessor/releaseResources", "info", "=== STARTING RELEASE RESOURCES ===");
     
     try {
         // Okamžité zastavení zpracování
@@ -183,20 +196,20 @@ void AudioPluginAudioProcessor::releaseResources()
         
         // Vyčištění vzorků
         sampleLibrary_.clear();
-        logger_.log("PluginProcessor/releaseResources", "info", "Sample library vyčištěna");
+        logger_.log("PluginProcessor/releaseResources", "info", "Sample library cleared");
         
         // Reset stavu
         synthState_.store(SynthState::Uninitialized);
         
-        logger_.log("PluginProcessor/releaseResources", "info", "Všechny zdroje uvolněny");
+        logger_.log("PluginProcessor/releaseResources", "info", "All resources released");
         
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/releaseResources", "error", "Chyba při uvolňování: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/releaseResources", "error", "Error during release: " + juce::String(e.what()));
     } catch (...) {
-        logger_.log("PluginProcessor/releaseResources", "error", "Neznámá chyba při uvolňování");
+        logger_.log("PluginProcessor/releaseResources", "error", "Unknown error during release");
     }
     
-    logger_.log("PluginProcessor/releaseResources", "info", "=== RELEASE RESOURCES DOKONČEN ===");
+    logger_.log("PluginProcessor/releaseResources", "info", "=== RELEASE RESOURCES COMPLETED ===");
     DBG("Resources released");
 }
 
@@ -206,18 +219,18 @@ void AudioPluginAudioProcessor::releaseResources()
 void AudioPluginAudioProcessor::initializeSynth()
 {
     if (synthState_.load() != SynthState::Initializing) {
-        logger_.log("PluginProcessor/initializeSynth", "warn", "Inicializace přeskočena - nesprávný stav: " + getStateDescription());
+        logger_.log("PluginProcessor/initializeSynth", "warn", "Initialization skipped - wrong state: " + getStateDescription());
         return;
     }
 
-    logger_.log("PluginProcessor/initializeSynth", "info", "Zahájení inicializace syntezátoru");
+    logger_.log("PluginProcessor/initializeSynth", "info", "Starting synth initialization");
     
     try {
         if (sampleRate_ <= 0.0) {
-            throw std::runtime_error("Sample rate není nastaven");
+            throw std::runtime_error("Sample rate not set");
         }
         
-        logger_.log("PluginProcessor/initializeSynth", "info", "Inicializace sample library...");
+        logger_.log("PluginProcessor/initializeSynth", "info", "Initializing sample library...");
         sampleLibrary_.initialize(sampleRate_);
         
         // Kontrola, zda byla inicializace úspěšná
@@ -233,17 +246,76 @@ void AudioPluginAudioProcessor::initializeSynth()
         }
         
         if (!hasValidSamples) {
-            throw std::runtime_error("Žádné vzorky nebyly vygenerovány");
+            throw std::runtime_error("No samples were generated");
         }
         
         synthState_.store(SynthState::Ready);
-        logger_.log("PluginProcessor/initializeSynth", "info", "Syntezátor úspěšně inicializován");
+        logger_.log("PluginProcessor/initializeSynth", "info", "Synth successfully initialized");
         
     } catch (const std::exception& e) {
-        handleSynthError("Inicializace selhala: " + juce::String(e.what()));
+        handleSynthError("Initialization failed: " + juce::String(e.what()));
         synthState_.store(SynthState::Error);
     } catch (...) {
-        handleSynthError("Neznámá chyba při inicializaci");
+        handleSynthError("Unknown error during initialization");
+        synthState_.store(SynthState::Error);
+    }
+}
+
+/**
+ * @brief Rychlá reinicializace bez regenerování samples (po releaseResources se stejným SR)
+ */
+void AudioPluginAudioProcessor::initializeSynthFast()
+{
+    if (synthState_.load() != SynthState::Initializing) {
+        logger_.log("PluginProcessor/initializeSynthFast", "warn", "Fast init skipped - wrong state: " + getStateDescription());
+        return;
+    }
+
+    logger_.log("PluginProcessor/initializeSynthFast", "info", "Starting FAST synth reinitialization");
+    
+    try {
+        if (sampleRate_ <= 0.0) {
+            throw std::runtime_error("Sample rate not set");
+        }
+        
+        logger_.log("PluginProcessor/initializeSynthFast", "info", "Fast loading sample library from disk...");
+        
+        // OPTIMALIZACE: Rychlé načtení existujících samples z disku
+        // OPRAVA: Přidán komentář před nepoužívaný parametr status pro odstranění warning C4100
+        auto progressCallback = [this](int current, int total, const juce::String& /*status*/) {
+            // Redukované progress reporting
+            if (current % 100 == 0 || current == total) {
+                logger_.log("PluginProcessor/initializeSynthFast", "debug", 
+                           "Fast progress: " + juce::String(current) + "/" + juce::String(total));
+            }
+        };
+        
+        sampleLibrary_.initialize(sampleRate_, progressCallback);
+        
+        // Kontrola, zda byla inicializace úspěšná
+        bool hasValidSamples = false;
+        for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
+            for (uint8_t level = 0; level < 8; ++level) {
+                if (sampleLibrary_.isNoteAvailable(note, level)) {
+                    hasValidSamples = true;
+                    break;
+                }
+            }
+            if (hasValidSamples) break;
+        }
+        
+        if (!hasValidSamples) {
+            throw std::runtime_error("No samples available after fast init");
+        }
+        
+        synthState_.store(SynthState::Ready);
+        logger_.log("PluginProcessor/initializeSynthFast", "info", "Fast synth reinitialization completed successfully");
+        
+    } catch (const std::exception& e) {
+        handleSynthError("Fast initialization failed: " + juce::String(e.what()));
+        synthState_.store(SynthState::Error);
+    } catch (...) {
+        handleSynthError("Unknown error during fast initialization");
         synthState_.store(SynthState::Error);
     }
 }
@@ -271,11 +343,11 @@ juce::String AudioPluginAudioProcessor::getStateDescription() const
 {
     juce::String base;
     switch (synthState_.load()) {
-        case SynthState::Uninitialized: base = "Neinicializováno"; break;
-        case SynthState::Initializing: base = "Inicializace"; break;
-        case SynthState::Ready: base = "Připraveno"; break;
-        case SynthState::Error: base = "Chyba"; break;
-        default: base = "Neznámý stav"; break;
+        case SynthState::Uninitialized: base = "Uninitialized"; break;
+        case SynthState::Initializing: base = "Initializing"; break;
+        case SynthState::Ready: base = "Ready"; break;
+        case SynthState::Error: base = "Error"; break;
+        default: base = "Unknown state"; break;
     }
     
     base += " (Processing: " + juce::String(processingEnabled_.load() ? "ON" : "OFF") + ")";
@@ -298,23 +370,23 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     try {
         if (shouldLog) {
             logger_.log("PluginProcessor/processBlock", "debug", 
-                       "Blok #" + juce::String(blockCounter) + " - Stav: " + getStateDescription() + 
-                       ", Velikost: " + juce::String(buffer.getNumSamples()) + 
-                       ", Kanály: " + juce::String(buffer.getNumChannels()));
+                       "Block #" + juce::String(blockCounter) + " - State: " + getStateDescription() + 
+                       ", Size: " + juce::String(buffer.getNumSamples()) + 
+                       ", Channels: " + juce::String(buffer.getNumChannels()));
         }
         
         // Základní validace
         if (!processingEnabled_.load() || synthState_.load() != SynthState::Ready) {
             buffer.clear();
             if (shouldLog) {
-                logger_.log("PluginProcessor/processBlock", "debug", "Blok přeskočen - zpracování vypnuto nebo nesprávný stav");
+                logger_.log("PluginProcessor/processBlock", "debug", "Block skipped - processing disabled or wrong state");
             }
             return;
         }
         
         // Validace bufferu
         if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0) {
-            logger_.log("PluginProcessor/processBlock", "error", "Neplatný buffer - samples: " + 
+            logger_.log("PluginProcessor/processBlock", "error", "Invalid buffer - samples: " + 
                        juce::String(buffer.getNumSamples()) + ", channels: " + juce::String(buffer.getNumChannels()));
             return;
         }
@@ -333,9 +405,9 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                                          static_cast<uint8_t>(msg.getVelocity()));
                     if (shouldLog) {
                         logger_.log("PluginProcessor/processBlock", "debug", 
-                                   "NoteOn: nota " + juce::String(msg.getNoteNumber()) + 
+                                   "NoteOn: note " + juce::String(msg.getNoteNumber()) + 
                                    ", velocity " + juce::String(msg.getVelocity()) + 
-                                   ", kanál " + juce::String(msg.getChannel()));
+                                   ", channel " + juce::String(msg.getChannel()));
                     }
                 } else if (msg.isNoteOff()) {
                     // OPRAVA: Explicitní cast pro odstranění warning C4244
@@ -343,8 +415,8 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                                           static_cast<uint8_t>(msg.getNoteNumber()));
                     if (shouldLog) {
                         logger_.log("PluginProcessor/processBlock", "debug", 
-                                   "NoteOff: nota " + juce::String(msg.getNoteNumber()) + 
-                                   ", kanál " + juce::String(msg.getChannel()));
+                                   "NoteOff: note " + juce::String(msg.getNoteNumber()) + 
+                                   ", channel " + juce::String(msg.getChannel()));
                     }
                 } else if (msg.isController()) {
                     // OPRAVA: Explicitní cast pro odstranění warning C4244
@@ -359,19 +431,19 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                 }
             }
         } catch (const std::exception& e) {
-            logger_.log("PluginProcessor/processBlock", "error", "Chyba při zpracování MIDI: " + juce::String(e.what()));
+            logger_.log("PluginProcessor/processBlock", "error", "Error processing MIDI: " + juce::String(e.what()));
             // Pokračujeme bez MIDI dat
         }
         
         if (shouldLog && midiEventCount > 0) {
-            logger_.log("PluginProcessor/processBlock", "debug", "MIDI zprávy zpracovány: " + juce::String(midiEventCount));
+            logger_.log("PluginProcessor/processBlock", "debug", "MIDI messages processed: " + juce::String(midiEventCount));
         }
 
         // Zpracování hlasů s error handlingem
         try {
             voiceManager_.processMidiEvents(midiState_);
         } catch (const std::exception& e) {
-            logger_.log("PluginProcessor/processBlock", "error", "Chyba při zpracování hlasů: " + juce::String(e.what()));
+            logger_.log("PluginProcessor/processBlock", "error", "Error processing voices: " + juce::String(e.what()));
             buffer.clear();
             return;
         }
@@ -382,7 +454,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         // OPRAVA: Získání float* pointeru z AudioBuffer
         float* channelData = buffer.getWritePointer(0);
         if (channelData == nullptr) {
-            logger_.log("PluginProcessor/processBlock", "error", "Null pointer pro audio buffer kanál 0");
+            logger_.log("PluginProcessor/processBlock", "error", "Null pointer for audio buffer channel 0");
             return;
         }
         
@@ -390,7 +462,7 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
             // OPRAVA: Předání float* místo AudioBuffer
             voiceManager_.generateAudio(channelData, buffer.getNumSamples());
         } catch (const std::exception& e) {
-            logger_.log("PluginProcessor/processBlock", "error", "Chyba při generaci audio: " + juce::String(e.what()));
+            logger_.log("PluginProcessor/processBlock", "error", "Error generating audio: " + juce::String(e.what()));
             buffer.clear();
             return;
         }
@@ -400,10 +472,10 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
             try {
                 buffer.copyFrom(1, 0, buffer, 0, 0, buffer.getNumSamples());
                 if (shouldLog) {
-                    logger_.log("PluginProcessor/processBlock", "debug", "Stereo konverze dokončena");
+                    logger_.log("PluginProcessor/processBlock", "debug", "Stereo conversion completed");
                 }
             } catch (const std::exception& e) {
-                logger_.log("PluginProcessor/processBlock", "error", "Chyba při stereo konverzi: " + juce::String(e.what()));
+                logger_.log("PluginProcessor/processBlock", "error", "Error in stereo conversion: " + juce::String(e.what()));
                 // Necháme mono, není to kritická chyba
             }
         }
@@ -414,15 +486,15 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         if (shouldLog) {
             int activeVoices = voiceManager_.getActiveVoiceCount();
             logger_.log("PluginProcessor/processBlock", "debug", 
-                       "Blok dokončen - Aktivní hlasy: " + juce::String(activeVoices));
+                       "Block completed - Active voices: " + juce::String(activeVoices));
         }
         
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/processBlock", "error", "Výjimka v processBlock: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/processBlock", "error", "Exception in processBlock: " + juce::String(e.what()));
         buffer.clear(); // Zajistíme tichý výstup při chybě
         processingEnabled_.store(false); // Zastavíme zpracování při kritické chybě
     } catch (...) {
-        logger_.log("PluginProcessor/processBlock", "error", "Neznámá výjimka v processBlock");
+        logger_.log("PluginProcessor/processBlock", "error", "Unknown exception in processBlock");
         buffer.clear();
         processingEnabled_.store(false);
     }
@@ -433,17 +505,17 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
  */
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
-    logger_.log("PluginProcessor/createEditor", "info", "=== VYTVOŘENÍ EDITORU ===");
+    logger_.log("PluginProcessor/createEditor", "info", "=== CREATING EDITOR ===");
     
     try {
         auto* editor = new AudioPluginAudioProcessorEditor(*this);
-        logger_.log("PluginProcessor/createEditor", "info", "Editor úspěšně vytvořen");
+        logger_.log("PluginProcessor/createEditor", "info", "Editor successfully created");
         return editor;
     } catch (const std::exception& e) {
-        logger_.log("PluginProcessor/createEditor", "error", "Chyba při vytváření editoru: " + juce::String(e.what()));
+        logger_.log("PluginProcessor/createEditor", "error", "Error creating editor: " + juce::String(e.what()));
         return nullptr;
     } catch (...) {
-        logger_.log("PluginProcessor/createEditor", "error", "Neznámá chyba při vytváření editoru");
+        logger_.log("PluginProcessor/createEditor", "error", "Unknown error creating editor");
         return nullptr;
     }
 }

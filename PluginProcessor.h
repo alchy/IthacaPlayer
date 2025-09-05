@@ -124,6 +124,19 @@ private:
     void initializeSynth();
 
     /**
+     * @brief Rychlá reinicializace syntetizéru bez regenerování samples
+     * Volá se po releaseResources() se stejným sample rate pro optimalizaci.
+     * 
+     * Process:
+     * 1. Rychlé načtení existujících samples z disku
+     * 2. Validace dostupnosti vzorků
+     * 3. Nastavení Ready stavu
+     * 
+     * @throws std::runtime_error při kritických chybách
+     */
+    void initializeSynthFast();
+
+    /**
      * @brief Centrální metoda pro handling chyb s automatickým recovery.
      * 
      * Akce při chybě:
