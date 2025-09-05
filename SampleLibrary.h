@@ -9,30 +9,30 @@
 
 /**
  * @struct SampleSegment
- * @brief Kontejner pro 8 dynamic levels jedné MIDI noty s stereo support
+ * @brief Container for 8 dynamic levels of a single MIDI note with stereo support
  * 
- * Každá MIDI nota má 8 dynamic levels (vel0-vel7) s různými amplitudami.
- * Každý level může mít jinou délku a může být mono nebo stereo.
+ * Each MIDI note has 8 dynamic levels (vel0-vel7) with different amplitudes.
+ * Each level can have different length and can be mono or stereo.
  */
 struct SampleSegment
 {
     std::array<std::unique_ptr<float[]>, 8> dynamicLayers;      // 8 dynamic levels
-    std::array<uint32_t, 8> layerLengthSamples;                // Délka každého levelu
-    std::array<bool, 8> layerAllocated;                        // Zda je level alokován
-    std::array<bool, 8> layerIsStereo;                         // Zda je level stereo
-    uint8_t midiNote;                                           // MIDI nota tohoto segmentu
+    std::array<uint32_t, 8> layerLengthSamples;                // Length of each level
+    std::array<bool, 8> layerAllocated;                        // Whether level is allocated
+    std::array<bool, 8> layerIsStereo;                         // Whether level is stereo
+    uint8_t midiNote;                                           // MIDI note of this segment
     
     SampleSegment() : layerLengthSamples{}, layerAllocated{}, layerIsStereo{}, midiNote(0) {}
     
     /**
-     * @brief Vrátí délku konkrétního dynamic levelu
+     * @brief Returns length of specific dynamic level
      */
     uint32_t getLayerLength(uint8_t dynamicLevel) const {
         return (dynamicLevel < 8) ? layerLengthSamples[dynamicLevel] : 0;
     }
     
     /**
-     * @brief Vrátí data konkrétního dynamic levelu
+     * @brief Returns data of specific dynamic level
      */
     const float* getLayerData(uint8_t dynamicLevel) const {
         return (dynamicLevel < 8 && layerAllocated[dynamicLevel]) 
@@ -40,21 +40,21 @@ struct SampleSegment
     }
     
     /**
-     * @brief Zkontroluje zda je dynamic level dostupný
+     * @brief Checks if dynamic level is available
      */
     bool isLayerAvailable(uint8_t dynamicLevel) const {
         return (dynamicLevel < 8) && layerAllocated[dynamicLevel];
     }
     
     /**
-     * @brief Zkontroluje zda je dynamic level stereo
+     * @brief Checks if dynamic level is stereo
      */
     bool isLayerStereo(uint8_t dynamicLevel) const {
         return (dynamicLevel < 8) && layerIsStereo[dynamicLevel];
     }
     
     /**
-     * @brief Uloží sample do konkrétního dynamic levelu
+     * @brief Stores sample into specific dynamic level
      */
     void storeLayer(uint8_t dynamicLevel, std::unique_ptr<float[]> data, uint32_t length, bool isStereo) {
         if (dynamicLevel < 8) {
@@ -66,7 +66,7 @@ struct SampleSegment
     }
     
     /**
-     * @brief Resetuje všechny dynamic levels
+     * @brief Resets all dynamic levels
      */
     void reset() {
         for (int i = 0; i < 8; ++i) {
@@ -79,7 +79,7 @@ struct SampleSegment
     }
     
     /**
-     * @brief Spočítá celkovou spotřebu paměti tohoto segmentu
+     * @brief Calculates total memory usage of this segment
      */
     size_t getMemoryUsage() const {
         size_t total = 0;
@@ -94,22 +94,22 @@ struct SampleSegment
 
 /**
  * @struct LoadingStats
- * @brief Rozšířené statistiky loading procesu pro SampleLibrary
+ * @brief Extended loading process statistics for SampleLibrary
  */
 struct SampleLibraryStats
 {
-    int totalSamples;           // Celkový počet načtených samples
-    int loadedFromFiles;        // Počet načtených z WAV souborů
-    int generatedSines;         // Počet vygenerovaných sine waves
-    int savedToFiles;           // Počet uložených generovaných souborů
-    size_t totalMemoryUsed;     // Celková spotřeba paměti v bajtech
-    double loadingTimeSeconds;  // Celkový čas loading
+    int totalSamples;           // Total number of loaded samples
+    int loadedFromFiles;        // Number loaded from WAV files
+    int generatedSines;         // Number of generated sine waves
+    int savedToFiles;           // Number of saved generated files
+    size_t totalMemoryUsed;     // Total memory usage in bytes
+    double loadingTimeSeconds;  // Total loading time
     
     SampleLibraryStats() : totalSamples(0), loadedFromFiles(0), generatedSines(0), 
                           savedToFiles(0), totalMemoryUsed(0), loadingTimeSeconds(0.0) {}
     
     /**
-     * @brief Vrátí lidsky čitelný popis statistik
+     * @brief Returns human-readable description of statistics
      */
     juce::String getDescription() const {
         return "Samples: " + juce::String(totalSamples) + 
@@ -123,16 +123,16 @@ struct SampleLibraryStats
 
 /**
  * @class SampleLibrary
- * @brief Refaktorovaná sample library s podporou dynamic levels a hybridního loading
+ * @brief Refactored sample library with dynamic levels support and hybrid loading
  * 
- * Nové vlastnosti:
- * - 8 dynamic levels pro každou MIDI notu (vel0-vel7)
- * - Hybridní loading: WAV soubory + fallback sine generation
- * - Variable length samples (každý level může mít jinou délku)
- * - Stereo/mono support s automatickou konverzí
- * - Automatické ukládání vygenerovaných samples
- * - Thread-safe přístup s mutexem
- * - Detailní loading statistiky
+ * Key features:
+ * - 8 dynamic levels per MIDI note (vel0-vel7)
+ * - Hybrid loading: WAV files + fallback sine generation
+ * - Variable length samples (each level can have different length)
+ * - Stereo/mono support with automatic conversion
+ * - Automatic saving of generated samples
+ * - Thread-safe access with mutex
+ * - Detailed loading statistics
  */
 class SampleLibrary
 {
@@ -140,56 +140,56 @@ public:
     SampleLibrary();
     ~SampleLibrary() = default;
 
-    // === Hlavní rozhraní ===
+    // === Main Interface ===
     
     /**
-     * @brief Inicializuje sample library s hybridním loading systémem
+     * @brief Initializes sample library with hybrid loading system
      * @param sampleRate Target sample rate
-     * @param progressCallback Callback pro progress reporting
+     * @param progressCallback Callback for progress reporting
      */
     void initialize(double sampleRate, 
                    std::function<void(int, int, const juce::String&)> progressCallback = nullptr);
 
     /**
-     * @brief Vyčistí všechny samples (uvolní paměť)
+     * @brief Clears all samples (frees memory)
      */
     void clear();
 
-    // === Rozšířené API pro dynamic levels s stereo support ===
+    // === Extended API for dynamic levels with stereo support ===
     
     /**
-     * @brief Vrátí sample data pro konkrétní notu a dynamic level
-     * @param midiNote MIDI nota (21-108)
+     * @brief Returns sample data for specific note and dynamic level
+     * @param midiNote MIDI note (21-108)
      * @param dynamicLevel Dynamic level (0-7)
-     * @return Ukazatel na audio data nebo nullptr
+     * @return Pointer to audio data or nullptr
      */
     const float* getSampleData(uint8_t midiNote, uint8_t dynamicLevel) const;
     
     /**
-     * @brief Vrátí délku sample pro konkrétní notu a dynamic level
-     * @param midiNote MIDI nota
+     * @brief Returns sample length for specific note and dynamic level
+     * @param midiNote MIDI note
      * @param dynamicLevel Dynamic level
-     * @return Délka v samples nebo 0
+     * @return Length in samples or 0
      */
     uint32_t getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) const;
     
     /**
-     * @brief Zkontroluje dostupnost konkrétního dynamic levelu
-     * @param midiNote MIDI nota
+     * @brief Checks availability of specific dynamic level
+     * @param midiNote MIDI note
      * @param dynamicLevel Dynamic level
-     * @return true pokud je dostupný
+     * @return true if available
      */
     bool isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) const;
     
     /**
-     * @brief Zkontroluje zda je sample stereo
-     * @param midiNote MIDI nota
+     * @brief Checks if sample is stereo
+     * @param midiNote MIDI note
      * @param dynamicLevel Dynamic level
-     * @return true pokud je stereo
+     * @return true if stereo
      */
     bool isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const;
 
-    // === Backward compatibility (používá dynamic level 0) ===
+    // === Backward compatibility (uses dynamic level 0) ===
     
     const float* getSampleData(uint8_t midiNote) const {
         return getSampleData(midiNote, 0);
@@ -203,37 +203,37 @@ public:
         return isNoteAvailable(midiNote, 0);
     }
 
-    // === Utility metody ===
+    // === Utility methods ===
     
     /**
-     * @brief Mapuje MIDI velocity na dynamic level
+     * @brief Maps MIDI velocity to dynamic level
      * @param velocity MIDI velocity (0-127)
      * @return Dynamic level (0-7)
      */
     static uint8_t velocityToDynamicLevel(uint8_t velocity);
     
     /**
-     * @brief Vrátí loading statistiky
+     * @brief Returns loading statistics
      */
     const SampleLibraryStats& getLoadingStats() const { return loadingStats_; }
     
     /**
-     * @brief Vrátí celkovou spotřebu paměti
+     * @brief Returns total memory usage
      */
     size_t getTotalMemoryUsage() const;
     
     /**
-     * @brief Vrátí počet dostupných not
+     * @brief Returns count of available notes
      */
     int getAvailableNoteCount() const;
     
     /**
-     * @brief Vrátí detailní informace o dostupných dynamic levels
+     * @brief Returns detailed information about available dynamic levels
      */
     struct AvailabilityInfo {
         int totalNotes;
         int notesWithAnyLevel;
-        std::array<int, 8> levelCounts;  // Počet not pro každý level
+        std::array<int, 8> levelCounts;  // Count of notes for each level
         int monoSamples;
         int stereoSamples;
         
@@ -243,31 +243,37 @@ public:
     
     AvailabilityInfo getAvailabilityInfo() const;
 
-    // === Konstanty ===
+    // === Constants ===
     
     static constexpr uint8_t MIN_NOTE = 21;        // A0
     static constexpr uint8_t MAX_NOTE = 108;       // C8
     static constexpr uint8_t NUM_DYNAMIC_LEVELS = 8;
-    static constexpr double SAMPLE_SECONDS = 12.0; // Délka generovaných samples
+    static constexpr double SAMPLE_SECONDS = 12.0; // Length of generated samples
 
 private:
-    // === Private členové ===
+    // === Private members ===
     
     mutable std::mutex accessMutex_;                        // Thread safety
-    std::array<SampleSegment, 128> sampleSegments_;        // Storage pro všechny MIDI noty
+    std::array<SampleSegment, 128> sampleSegments_;        // Storage for all MIDI notes
     double sampleRate_{44100.0};                           // Current sample rate
-    Logger& logger_;                                        // Reference na logger
-    SampleLibraryStats loadingStats_;                      // Loading statistiky
+    Logger& logger_;                                        // Reference to logger
+    SampleLibraryStats loadingStats_;                      // Loading statistics
     
-    // === Private metody ===
+    // === Private methods ===
     
     /**
-     * @brief Uloží načtený sample do interní struktury
+     * @brief Stores loaded sample into RAM-based internal structure
+     * 
+     * This method copies audio data from LoadedSample into the internal
+     * RAM-based storage structure (sampleSegments_). It does NOT save
+     * to disk - that's handled by SampleLoader.
+     * 
+     * @param sample Loaded sample to store in RAM
      */
-    void storeSample(const LoadedSample& sample);
+    void storeSampleRam(const LoadedSample& sample);
     
     /**
-     * @brief Validuje MIDI notu a dynamic level
+     * @brief Validates MIDI note and dynamic level
      */
     bool isValidNote(uint8_t midiNote) const {
         return midiNote >= MIN_NOTE && midiNote <= MAX_NOTE;

@@ -2,16 +2,16 @@
 #include <cmath>
 
 /**
- * @brief Konstruktor SampleLibrary
+ * @brief SampleLibrary constructor
  */
 SampleLibrary::SampleLibrary()
     : logger_(Logger::getInstance())
 {
-    logger_.log("SampleLibrary/constructor", "info", "SampleLibrary inicializována s dynamic levels");
+    logger_.log("SampleLibrary/constructor", "info", "SampleLibrary initialized with dynamic levels");
 }
 
 /**
- * @brief Inicializuje sample library s hybridním loading systémem
+ * @brief Initializes sample library with hybrid loading system
  */
 void SampleLibrary::initialize(double sampleRate, 
                               std::function<void(int, int, const juce::String&)> progressCallback)
@@ -27,25 +27,25 @@ void SampleLibrary::initialize(double sampleRate,
     clear();
 
     logger_.log("SampleLibrary/initialize", "info",
-                "Začátek inicializace se sample rate=" + juce::String(sampleRate_) + 
-                " s dynamic levels");
+                "Starting initialization with sample rate=" + juce::String(sampleRate_) + 
+                " using dynamic levels");
 
-    // Reset statistik
+    // Reset statistics
     loadingStats_ = SampleLibraryStats();
 
     try {
-        // Vytvoření SampleLoader
+        // Create SampleLoader
         SampleLoader loader(sampleRate);
         juce::File instrumentDir = SampleLoader::getDefaultInstrumentDirectory();
         
-        // Ujištění, že directory existuje
+        // Ensure directory exists
         if (!instrumentDir.exists()) {
             if (!instrumentDir.createDirectory()) {
-                throw std::runtime_error("Nelze vytvořit instrument directory: " + 
+                throw std::runtime_error("Cannot create instrument directory: " + 
                                        instrumentDir.getFullPathName().toStdString());
             }
             logger_.log("SampleLibrary/initialize", "info", 
-                       "Vytvořen instrument directory: " + instrumentDir.getFullPathName());
+                       "Created instrument directory: " + instrumentDir.getFullPathName());
         }
 
         // Progress callback wrapper
@@ -53,7 +53,7 @@ void SampleLibrary::initialize(double sampleRate,
             if (progressCallback) {
                 progressCallback(current, total, status);
             }
-            // Logování každého 50. sample pro snížení noise
+            // Log every 50th sample to reduce noise
             if (current % 50 == 0 || current == total) {
                 logger_.log("SampleLibrary/initialize", "debug", 
                            "Progress: " + juce::String(current) + "/" + juce::String(total) + 
@@ -61,13 +61,13 @@ void SampleLibrary::initialize(double sampleRate,
             }
         };
 
-        // Načtení všech samples
+        // Load all samples
         std::vector<LoadedSample> loadedSamples = loader.loadInstrument(instrumentDir, progressWrapper);
         
-        // Uložení samples do interní struktury
+        // Store samples in internal structure
         for (const auto& sample : loadedSamples) {
             try {
-                storeSample(sample);
+                storeSampleRam(sample);
                 loadingStats_.totalSamples++;
                 
                 if (sample.isGenerated) {
@@ -78,30 +78,30 @@ void SampleLibrary::initialize(double sampleRate,
                 
             } catch (const std::exception& e) {
                 logger_.log("SampleLibrary/initialize", "error",
-                           "Chyba při ukládání sample noty " + juce::String((int)sample.midiNote) + 
+                           "Error storing sample for note " + juce::String((int)sample.midiNote) + 
                            " level " + juce::String((int)sample.dynamicLevel) + 
                            ": " + juce::String(e.what()));
             }
         }
         
-        // Převzetí statistik z SampleLoader
+        // Adopt statistics from SampleLoader
         const auto& loaderStats = loader.getLoadingStats();
         loadingStats_.savedToFiles = loaderStats.filesSaved;
         loadingStats_.totalMemoryUsed = getTotalMemoryUsage();
         loadingStats_.loadingTimeSeconds = (juce::Time::getMillisecondCounterHiRes() - startTime) / 1000.0;
 
         logger_.log("SampleLibrary/initialize", "info",
-                   "Inicializace dokončena: " + loadingStats_.getDescription());
+                   "Initialization completed: " + loadingStats_.getDescription());
         
-        // Kontrola, zda máme nějaké samples
+        // Check if we have any samples
         if (loadingStats_.totalSamples == 0) {
-            throw std::runtime_error("Žádné samples nebyly načteny!");
+            throw std::runtime_error("No samples were loaded!");
         }
         
-        // Kontrola dostupnosti základních not pro debugging
+        // Check availability of basic notes for debugging
         AvailabilityInfo availInfo = getAvailabilityInfo();
         logger_.log("SampleLibrary/initialize", "info",
-                   "Dostupné noty: " + juce::String(availInfo.notesWithAnyLevel) + "/" + 
+                   "Available notes: " + juce::String(availInfo.notesWithAnyLevel) + "/" + 
                    juce::String(MAX_NOTE - MIN_NOTE + 1) + 
                    " (mono: " + juce::String(availInfo.monoSamples) + 
                    ", stereo: " + juce::String(availInfo.stereoSamples) + ")");
@@ -115,45 +115,45 @@ void SampleLibrary::initialize(double sampleRate,
         
     } catch (const std::exception& e) {
         logger_.log("SampleLibrary/initialize", "error",
-                   "Fatální chyba při inicializaci: " + juce::String(e.what()));
+                   "Fatal error during initialization: " + juce::String(e.what()));
         throw;
     } catch (...) {
         logger_.log("SampleLibrary/initialize", "error",
-                   "Neznámá fatální chyba při inicializaci");
+                   "Unknown fatal error during initialization");
         throw std::runtime_error("Unknown error during initialization");
     }
 }
 
 /**
- * @brief Vyčistí všechny samples
+ * @brief Clears all samples from memory
  */
 void SampleLibrary::clear()
 {
     std::lock_guard<std::mutex> lock(accessMutex_);
     
-    logger_.log("SampleLibrary/clear", "info", "Začátek čištění SampleLibrary");
+    logger_.log("SampleLibrary/clear", "info", "Starting SampleLibrary clear operation");
     
     size_t totalFreed = 0;
     int segmentsCleared = 0;
     
     for (auto& segment : sampleSegments_) {
-        if (segment.midiNote != 0) { // Segment má nějaká data
+        if (segment.midiNote != 0) { // Segment has data
             totalFreed += segment.getMemoryUsage();
             segment.reset();
             segmentsCleared++;
         }
     }
 
-    // Reset statistik
+    // Reset statistics
     loadingStats_ = SampleLibraryStats();
 
     logger_.log("SampleLibrary/clear", "info", 
-               "SampleLibrary vyčištěna - uvolněno " + juce::String(segmentsCleared) + 
-               " segmentů, " + juce::String(totalFreed / (1024*1024)) + "MB");
+               "SampleLibrary cleared - freed " + juce::String(segmentsCleared) + 
+               " segments, " + juce::String(totalFreed / (1024*1024)) + "MB");
 }
 
 /**
- * @brief Vrátí sample data pro konkrétní notu a dynamic level
+ * @brief Returns sample data for specific note and dynamic level
  */
 const float* SampleLibrary::getSampleData(uint8_t midiNote, uint8_t dynamicLevel) const
 {
@@ -166,7 +166,7 @@ const float* SampleLibrary::getSampleData(uint8_t midiNote, uint8_t dynamicLevel
 }
 
 /**
- * @brief Vrátí délku sample pro konkrétní notu a dynamic level
+ * @brief Returns sample length for specific note and dynamic level
  */
 uint32_t SampleLibrary::getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) const
 {
@@ -179,7 +179,7 @@ uint32_t SampleLibrary::getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) 
 }
 
 /**
- * @brief Zkontroluje dostupnost konkrétního dynamic levelu
+ * @brief Checks availability of specific dynamic level
  */
 bool SampleLibrary::isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) const
 {
@@ -192,7 +192,7 @@ bool SampleLibrary::isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) cons
 }
 
 /**
- * @brief Zkontroluje zda je sample stereo
+ * @brief Checks if sample is stereo
  */
 bool SampleLibrary::isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const
 {
@@ -205,9 +205,9 @@ bool SampleLibrary::isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const
 }
 
 /**
- * @brief Uloží načtený sample do interní struktury
+ * @brief Stores loaded sample into RAM-based internal structure
  */
-void SampleLibrary::storeSample(const LoadedSample& sample)
+void SampleLibrary::storeSampleRam(const LoadedSample& sample)
 {
     if (!isValidNote(sample.midiNote) || !isValidDynamicLevel(sample.dynamicLevel)) {
         throw std::invalid_argument("Invalid MIDI note or dynamic level");
@@ -222,7 +222,7 @@ void SampleLibrary::storeSample(const LoadedSample& sample)
     SampleSegment& segment = sampleSegments_[sample.midiNote];
     segment.midiNote = sample.midiNote;
     
-    // Kopírování dat (nutné kvůli unique_ptr)
+    // Copy data (necessary due to unique_ptr)
     size_t totalSamples = static_cast<size_t>(sample.lengthSamples) * sample.numChannels;
     auto dataCopy = std::make_unique<float[]>(totalSamples);
     std::copy(sample.audioData.get(), 
@@ -232,8 +232,8 @@ void SampleLibrary::storeSample(const LoadedSample& sample)
     bool isStereo = (sample.numChannels == 2);
     segment.storeLayer(sample.dynamicLevel, std::move(dataCopy), sample.lengthSamples, isStereo);
     
-    logger_.log("SampleLibrary/storeSample", "debug",
-               "Uložen sample nota " + juce::String((int)sample.midiNote) + 
+    logger_.log("SampleLibrary/storeSampleRam", "debug",
+               "Stored sample in RAM - note " + juce::String((int)sample.midiNote) + 
                " level " + juce::String((int)sample.dynamicLevel) + 
                " (" + juce::String(sample.lengthSamples) + " samples, " +
                juce::String(isStereo ? "stereo" : "mono") + ", " +
@@ -241,7 +241,7 @@ void SampleLibrary::storeSample(const LoadedSample& sample)
 }
 
 /**
- * @brief Mapuje MIDI velocity na dynamic level
+ * @brief Maps MIDI velocity to dynamic level
  */
 uint8_t SampleLibrary::velocityToDynamicLevel(uint8_t velocity)
 {
@@ -249,7 +249,7 @@ uint8_t SampleLibrary::velocityToDynamicLevel(uint8_t velocity)
 }
 
 /**
- * @brief Vrátí celkovou spotřebu paměti
+ * @brief Returns total memory usage in bytes
  */
 size_t SampleLibrary::getTotalMemoryUsage() const
 {
@@ -264,7 +264,7 @@ size_t SampleLibrary::getTotalMemoryUsage() const
 }
 
 /**
- * @brief Vrátí počet dostupných not
+ * @brief Returns count of available notes
  */
 int SampleLibrary::getAvailableNoteCount() const
 {
@@ -272,7 +272,7 @@ int SampleLibrary::getAvailableNoteCount() const
     
     int count = 0;
     for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
-        // Počítáme notu jako dostupnou pokud má alespoň jeden dynamic level
+        // Count note as available if it has at least one dynamic level
         bool hasAnyLevel = false;
         for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
             if (sampleSegments_[note].isLayerAvailable(level)) {
@@ -289,7 +289,7 @@ int SampleLibrary::getAvailableNoteCount() const
 }
 
 /**
- * @brief Vrátí detailní informace o dostupných dynamic levels
+ * @brief Returns detailed information about available dynamic levels
  */
 SampleLibrary::AvailabilityInfo SampleLibrary::getAvailabilityInfo() const
 {
