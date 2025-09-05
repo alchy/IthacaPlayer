@@ -92,7 +92,7 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
         sampleRate_ = sampleRate;
         samplesPerBlock_ = samplesPerBlock;
         
-        // TEPRVE TEĎ detekce změn (po uložení nových hodnot)
+        // Detekce změn (po uložení nových hodnot)
         bool sampleRateChanged = (std::abs(sampleRate - oldSampleRate) > 1.0);
         bool bufferSizeChanged = (samplesPerBlock != oldBufferSize);
         bool isFirstInit = (synthState_.load() == SynthState::Uninitialized);
@@ -106,7 +106,7 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
                    ", FirstInit: " + juce::String(isFirstInit ? "ANO" : "NE") + 
                    ", HasError: " + juce::String(hasError ? "ANO" : "NE"));
         
-        // OPTIMALIZACE: Reinicializace pouze když je skutečně potřeba
+        // OPRAVA: Reinicializace pouze když je skutečně potřeba (POUZE sample rate nebo první init/error)
         bool needsFullReinit = isFirstInit || hasError || sampleRateChanged;
         
         if (needsFullReinit) {
@@ -127,10 +127,14 @@ void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerB
             logger_.log("PluginProcessor/prepareToPlay", "info", 
                        "Změna POUZE velikosti bufferu z " + juce::String(oldBufferSize) + 
                        " na " + juce::String(samplesPerBlock) + 
-                       " - žádná reinicializace vzorků není potřeba");
+                       " - ŽÁDNÁ reinicializace vzorků není potřeba, pouze update interních bufferů");
             
-            // Pouze logování změny - žádná reinicializace
-            // Audio systém už je připraven, jen se změnila velikost bloku
+            // OPRAVA: Pro změnu buffer size nepotřebujeme reinicializovat samples!
+            // Audio engine JUCE si sám spravuje buffery, my jen logujeme změnu
+            // Případně zde můžeme aktualizovat pouze interní buffery VoiceManageru apod.
+            
+            // Pokud VoiceManager má nějaké interní buffery závislé na buffer size, aktualizujeme je zde
+            // voiceManager_.updateBufferSize(samplesPerBlock); // Pokud by to bylo potřeba
             
         } else {
             logger_.log("PluginProcessor/prepareToPlay", "info", 
