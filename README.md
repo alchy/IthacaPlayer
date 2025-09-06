@@ -248,12 +248,21 @@ https://trirpi.github.io/posts/developing-audio-plugins-with-juce-and-visual-stu
 
 
 # pridani JUCE
-- git submodule add https://github.com/juce-framework/JUCE.git JUCE
 
+```
+git submodule add https://github.com/juce-framework/JUCE.git JUCE
+```
+
+```
+git submodule update --init
+```
+
+```
 cd JUCE
 cmake -B build
 cmake -B build -DJUCE_BUILD_EXTRAS=ON
 cmake --build build --target AudioPluginHost
+```
 
 # Visual Studio Code
 
