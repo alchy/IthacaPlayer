@@ -1,9 +1,11 @@
 ## Cesty na build soubory
 
-[build]   juce_vst3_helper.vcxproj .\build\Debug\juce_vst3_helper.exe  
-[build]   IthacaPlayer.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\IthacaPlayer_SharedCode.lib  
-[build]   IthacaPlayer_VST3.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3  
-[build]   IthacaPlayer_Standalone.vcxproj -> .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe  
+| Soubor                  | Artefact                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------- |
+| juce_vst3_helper        | .\build\Debug\juce_vst3_helper.exe                                                                |
+| IthacaPlayer            | .\build\IthacaPlayer_artefacts\Debug\IthacaPlayer_SharedCode.lib                                  |
+| IthacaPlayer_VST3       | .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3 |
+| IthacaPlayer_Standalone | .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe                                  |
 
 ## Cesta na aplikační data
 
@@ -17,6 +19,10 @@ Zde se ukládají generované WAV soubory pro samples (v podsložce "instrument"
 
 ```
 Get-Content -Path C:\Users\nemej992\AppData\Roaming\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait
+```
+
+```
+Get-Content -Path "C:\Users\Jindrich Nemec\AppData\Roaming\IthacaPlayer\IthacaPlayer.log" -Tail 10 -Wait
 ```
 
 ## MIDI tools
@@ -36,7 +42,9 @@ https://www.tobias-erichsen.de/software/loopmidi.html
 
 ## Nastavení vývojového prostředí
 
-Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) proveďte následující kroky. Předpokládá se instalace Visual Studio Build Tools (s MSVC kompilátorem: https://visualstudio.microsoft.com/cs/visual-cpp-build-tools/) a CMake.  
+Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) proveďte následující kroky: 
+
+Předpokládá se instalace Visual Studio Build Tools s MSVC kompilátorem: [https://visualstudio.microsoft.com/cs/visual-cpp-build-tools/]) a CMake.  
 
 ### Požadavky  
 - Visual Studio Build Tools (MSVC kompilátor).  
@@ -45,25 +53,19 @@ Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) prov
 
 ### Kroky nastavení  
 1. **Instalace rozšíření ve VS Code**:  
-   - Otevřete Extensions (Ctrl+Shift+X).  
-   - Nainstalujte: C/C++ (od Microsoftu pro podporu C++ syntaxe, IntelliSense a ladění) a CMake Tools (od Microsoftu pro integraci CMake).  
-   - Restartujte VS Code.  
+   - Otevřete Extensions [Ctrl+Shift+X].  
+   - Nainstalujte pro podporu C++ syntaxe, IntelliSense a ladění "C/C++ for Visual Studio Code" nebo "C/C++ Extension Pack" - integrace CMake.  
+   - Restartujte VS Code.
 
-2. **Otevření projektu**:  
-   - Přejděte na File > Open Folder a vyberte složku s CMakeLists.txt.  
-
-3. **Výběr kompilátoru (kit)**:  
-   - V Command Palette (Ctrl+Shift+P) napište "CMake: Select a Kit".  
-   - Vyberte "amd64" (64-bit) nebo ekvivalent podle potřeby (např. x64 pro moderní systémy).  
-
-4. **Konfigurace projektu**:  
+2. **Výběr kompilátoru (kit)**:  
+   - V Command Palette [Ctrl+Shift+P] napište "CMake: Select a Kit".  
+   - Vyberte [amd64] (64-bit) nebo ekvivalent podle potřeby (např. x64 pro moderní systémy).
+   
+3. **Konfigurace projektu**:  
    - V Command Palette napište "CMake: Configure". To vygeneruje build soubory (obvykle ve složce "build").  
 
-5. **Build projektu**:  
+4. **Build projektu**:  
    - V Command Palette napište "CMake: Build" nebo použijte Shift+Ctrl+B (nyní nabídne CMake úlohy).  
-
-6. **Debugování (volitelně)**:  
-   - Nastavte breakpointy a spusťte "CMake: Debug" v Command Palette.  
 
 ---  
 

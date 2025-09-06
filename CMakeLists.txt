@@ -5,7 +5,7 @@ project(ITHACA_PLAYER VERSION 0.0.1)
 add_subdirectory(JUCE)
 
 juce_add_plugin(IthacaPlayer
-    COMPANY_NAME "Lord Audio"
+    COMPANY_NAME "LordAudio"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
