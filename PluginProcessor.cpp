@@ -269,21 +269,10 @@ void AudioPluginAudioProcessor::renderThreadFunction()
 {
     juce::ScopedJuceInitialiser_GUI scopedJuce;
     
-    // Nastavení vysoké priority pro real-time audio thread
-#ifdef _WIN32
-    HANDLE currentThread = GetCurrentThread();
-    SetThreadPriority(currentThread, THREAD_PRIORITY_TIME_CRITICAL);
-#elif defined(__APPLE__)
-    pthread_t thread = pthread_self();
-    struct sched_param param;
-    param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    pthread_setschedparam(thread, SCHED_FIFO, &param);
-#endif
-    
     // Proměnné pro time management
-    double rollingAverage = 2.0; // Počáteční odhad 2ms
+    double rollingAverage = 2.0;            // Počáteční odhad 2ms
     constexpr double targetCycleTime = 2.0; // Cíl 2ms cyklus
-    constexpr double alpha = 0.1; // EMA faktor
+    constexpr double alpha = 0.1;           // EMA faktor
     
     while (!shouldStop_.load())
     {
@@ -399,15 +388,16 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
 {
     juce::ScopedNoDenormals noDenormals; // Důležité pro výkon!
     
+    // Aplikace neni pripravena tak se zatim nic nepocita
     if (!isReadyForProcessing()) {
         buffer.clear();
         return;
     }
 
-    // 1. Okamžité zpracování MIDI pro minimální latenci
+    // Okamžité zpracování MIDI pro minimální latenci
     processMidiInRealTime(midiMessages);
 
-    // 2. Kopírování nejčerstvějšího bufferu
+    // Kopírování nejčerstvějšího bufferu
     if (isBufferReady_.load()) {
         const int readBuffer = currentReadBuffer_.load();
         copyAudioBuffer(buffer, audioBuffers_[readBuffer]);
@@ -418,18 +408,20 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         buffer.clear();
     }
 
-    // 3. Pokud není co renderovat, vypnout signalizaci
+    // Pokud není co renderovat, vypnout signalizaci
     if (midiMessages.isEmpty() && voiceManager_.getActiveVoiceCount() == 0) {
         isBufferReady_.store(false);
     }
 }
 
+// Instanciuje editor
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 {
     logger_.log("PluginProcessor/createEditor", "info", "Vytváření editoru.");
     return new AudioPluginAudioProcessorEditor(*this);
 }
 
+// JUCE povinna funkce
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new AudioPluginAudioProcessor();
