@@ -1,0 +1,4206 @@
+﻿===== File: CMakeLists.txt =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\CMakeLists.txt
+=====
+cmake_minimum_required(VERSION 3.22)
+
+project(ITHACA_PLAYER VERSION 0.0.1)
+
+add_subdirectory(JUCE)
+
+juce_add_plugin(IthacaPlayer
+    COMPANY_NAME "LordAudio"
+    IS_SYNTH TRUE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    PLUGIN_MANUFACTURER_CODE Lau0
+    PLUGIN_CODE Itca
+    FORMATS AU VST3 Standalone
+    PRODUCT_NAME "IthacaPlayer")
+
+juce_generate_juce_header(IthacaPlayer)
+
+target_sources(IthacaPlayer
+    PRIVATE
+        # Core system
+        Logger.h
+        Logger.cpp
+        
+        # Enhanced sample management with dynamic levels
+        SampleLoader.h
+        SampleLoader.cpp
+        SampleLibrary.h
+        SampleLibrary.cpp
+        
+        # MIDI and voice management
+        MidiStateManager.h
+        MidiStateManager.cpp
+        VoiceManager.h
+        VoiceManager.cpp
+        
+        # JUCE plugin interface
+        PluginEditor.h
+        PluginEditor.cpp
+        PluginProcessor.h
+        PluginProcessor.cpp
+
+        # BinaryData pro embeddovanÃ½ obrÃ¡zek
+        decorators/BinaryData.h
+        decorators/BinaryData.cpp)
+
+target_compile_definitions(IthacaPlayer
+    PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0)
+
+target_link_libraries(IthacaPlayer
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_audio_formats  # PÅ™idÃ¡no pro WAV loading
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags)
+
+
+===== File: JUCE-BUILD.md =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\JUCE-BUILD.md
+=====
+# https://cmake.org/download/
+# https://trirpi.github.io/posts/developing-audio-plugins-with-juce-and-visual-studio-code/
+
+
+# pridani JUCE
+- git submodule add https://github.com/juce-framework/JUCE.git JUCE
+
+cd JUCE
+cmake -B build
+cmake -B build -DJUCE_BUILD_EXTRAS=ON
+cmake --build build --target AudioPluginHost
+
+# Visual Studio Code
+
+Build the Project 
+- Terminal > Run Build Task (or press Ctrl+Shift+B)
+
+Run Without Debugging 
+- 
+
+
+===== File: Logger.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\Logger.cpp
+=====
+#include "Logger.h"
+#include <sstream>
+
+std::atomic<bool> Logger::loggingEnabled{true};
+
+/**
+ * @brief Konstruktor Logger.
+ * Inicializuje singleton a file logger (umÃ­stÄ›nÃ­ v app data sloÅ¾ce).
+ */
+Logger::Logger() {
+    // Inicializace file loggeru
+    fileLogger_ = std::unique_ptr<juce::FileLogger>(
+        juce::FileLogger::createDefaultAppLogger("IthacaPlayer", "IthacaPlayer.log", "Start IthacaPlayer logu", 0)
+    );
+}
+
+/**
+ * @brief VrÃ¡tÃ­ singleton instanci Logger.
+ * @return Reference na instanci.
+ */
+Logger& Logger::getInstance()
+{
+    static Logger instance;
+    return instance;
+}
+
+/**
+ * @brief Loguje zprÃ¡vu s ÄasovÃ½m razÃ­tkem, komponentou a zÃ¡vaÅ¾nostÃ­.
+ * Zapisuje jen do souboru (bez GUI).
+ * @param component Komponenta (napÅ™. tÅ™Ã­da/metoda).
+ * @param severity ZÃ¡vaÅ¾nost (info, debug, error, warn).
+ * @param message ZprÃ¡va.
+ */
+void Logger::log(const juce::String& component, const juce::String& severity, const juce::String& message)
+{
+    if (!loggingEnabled.load(std::memory_order_relaxed))
+        return;
+
+    auto now = juce::Time::getCurrentTime();
+    juce::String timestamp = now.formatted("%Y-%m-%d %H:%M:%S");
+    juce::String logEntry = "[" + timestamp + "] [" + component + "] [" + severity + "]: " + message;
+
+    pushToLogQueue(logEntry);
+
+    // ZÃ¡pis do souboru
+    if (fileLogger_ != nullptr) {
+        fileLogger_->logMessage(logEntry);
+    }
+}
+
+/**
+ * @brief PÅ™idÃ¡ log do queue (pro internÃ­ uklÃ¡dÃ¡nÃ­, pokud potÅ™eba).
+ * @param logEntry LogovacÃ­ zÃ¡znam.
+ */
+void Logger::pushToLogQueue(const juce::String& logEntry)
+{
+    std::lock_guard<std::mutex> lock(logMutex_);
+
+    uint8_t writeIndex = logQueue_.writeIndex.load();
+    uint8_t currentCount = logQueue_.count.load();
+
+    logQueue_.logs[writeIndex] = logEntry;
+    logQueue_.writeIndex.store(static_cast<uint8_t>(writeIndex + 1));
+
+    if (currentCount < 256) {
+        logQueue_.count.store(currentCount + 1);
+    } else {
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + 1);
+    }
+
+    if (logQueue_.count.load() > MAX_LOG_ENTRIES) {
+        uint8_t excess = logQueue_.count.load() - MAX_LOG_ENTRIES;
+        logQueue_.readIndex = static_cast<uint8_t>(logQueue_.readIndex + excess);
+        logQueue_.count.store(MAX_LOG_ENTRIES);
+    }
+}
+
+/**
+ * @brief VyÄistÃ­ logy v queue.
+ */
+void Logger::clearLogs()
+{
+    std::lock_guard<std::mutex> lock(logMutex_);
+    logQueue_.writeIndex.store(0);
+    logQueue_.count.store(0);
+    logQueue_.readIndex = 0;
+    for (auto& log : logQueue_.logs) {
+        log = juce::String();
+    }
+}
+
+
+===== File: Logger.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\Logger.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <atomic>
+#include <mutex>
+#include <array>
+#include <memory>
+
+#define MAX_LOG_ENTRIES 100
+
+/**
+ * @class Logger
+ * @brief Singleton logger pro souborovÃ© logovÃ¡nÃ­ (bez GUI zÃ¡vislosti).
+ * 
+ * Podporuje logovÃ¡nÃ­ s ÄasovÃ½m razÃ­tkem, zÃ¡vaÅ¾nostÃ­ a komponentou. RefaktorovÃ¡no: OdstranÄ›na GUI aktualizace, zÅ¯stalo jen souborovÃ© logovÃ¡nÃ­ pro debugging.
+ */
+class Logger
+{
+public:
+    static Logger& getInstance();
+
+    void log(const juce::String& component, const juce::String& severity, const juce::String& message);
+    static std::atomic<bool> loggingEnabled;
+
+    void clearLogs();
+
+private:
+    Logger();
+    ~Logger() = default;
+
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    struct LogQueue {
+        std::array<juce::String, 256> logs;
+        std::atomic<uint8_t> writeIndex{0};
+        std::atomic<uint8_t> count{0};
+        uint8_t readIndex{0};
+    };
+
+    LogQueue logQueue_;
+
+    mutable std::mutex logMutex_;  // Mutex pro queue
+
+    std::unique_ptr<juce::FileLogger> fileLogger_;  // File logger pro souborovÃ½ vÃ½stup
+
+    void pushToLogQueue(const juce::String& logEntry);
+};
+
+
+===== File: MidiStateManager.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\MidiStateManager.cpp
+=====
+#include "MidiStateManager.h"
+#include <algorithm>
+#include <cassert>
+
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4244)  // VarovÃ¡nÃ­ konverze pro MIDI hodnoty
+#endif
+
+/**
+ * @brief Konstruktor MidiStateManager.
+ * Inicializuje logger, resetuje queue a nastavuje vÃ½chozÃ­ hodnoty controllerÅ¯ podle MIDI standardu.
+ */
+MidiStateManager::MidiStateManager()
+    : logger_(Logger::getInstance())
+{
+    logger_.log("MidiStateManager/constructor", "info", "=== MIDI STATE MANAGER INITIALIZATION ===");
+    
+    // Inicializace aktivnÃ­ch not
+    for (auto& note : activeNotes_) {
+        note.store(false);  // VÅ¡echny noty neaktivnÃ­
+    }
+    
+    // Inicializace MIDI controller hodnot
+    for (int channel = 0; channel < MIDI_CHANNELS; ++channel) {
+        for (int controller = 0; controller < 128; ++controller) {
+            controllerValues_[channel][controller] = 0;  // VÃ½chozÃ­ 0
+        }
+        
+        // VÃ½chozÃ­ hodnoty pro standardnÃ­ controllery
+        controllerValues_[channel][7] = 100;   // Volume (vÃ½chozÃ­ vysokÃ¡)
+        controllerValues_[channel][10] = 64;   // Pan (stÅ™ed)
+        controllerValues_[channel][11] = 127;  // Expression (max)
+        controllerValues_[channel][64] = 0;    // Sustain pedal (vypnutÃ½)
+        controllerValues_[channel][91] = 0;    // Reverb (vypnutÃ½)
+        controllerValues_[channel][93] = 0;    // Chorus (vypnutÃ½)
+    }
+    
+    // Reset vÅ¡ech queue
+    for (auto& queue : noteOnQueues_) {
+        queue.reset();
+    }
+    for (auto& queue : noteOffQueues_) {
+        queue.reset();
+    }
+    
+    logger_.log("MidiStateManager/constructor", "info", "Initialization completed successfully");
+    DBG("MidiStateManager initialized.");  // PÅ™idanÃ½ debug pro konzoli
+}
+
+/**
+ * @brief Resetuje NoteQueue na vÃ½chozÃ­ stav.
+ * Nastavuje indexy a poÄet na 0, nemusÃ­ Äistit array (pÅ™epsÃ¡no pÅ™i pouÅ¾itÃ­).
+ */
+void MidiStateManager::NoteQueue::reset() {
+    // Thread-safe reset
+    std::lock_guard<std::mutex> lock(mutex);
+    
+    writeIndex.store(0);
+    count.store(0);
+    readIndex = 0;
+    
+    // VolitelnÃ© vyÄiÅ¡tÄ›nÃ­ dat pro debug ÃºÄely
+    #ifdef _DEBUG
+    std::fill(notes.begin(), notes.end(), 0);
+    #endif
+}
+
+/**
+ * @brief PÅ™idÃ¡ note-on do queue a aktualizuje stav aktivnÃ­ noty a velocity.
+ * @param channel MIDI kanÃ¡l (0-15)
+ * @param note MIDI nota (0-127)
+ * @param velocity Velocity (0-127)
+ */
+void MidiStateManager::pushNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+    // PÅ™idÃ¡na rozsÃ¡hlÃ¡ validace
+    if (channel >= MIDI_CHANNELS) {
+        logger_.log("MidiStateManager/pushNoteOn", "warn", 
+                   "Invalid MIDI channel: " + juce::String(channel));
+        return;
+    }
+    
+    if (note >= MIDI_NOTES) {
+        logger_.log("MidiStateManager/pushNoteOn", "warn", 
+                   "Invalid MIDI note: " + juce::String(note));
+        return;
+    }
+    
+    if (velocity == 0) {
+        // Velocity 0 je vlastnÄ› note-off
+        pushNoteOff(channel, note);
+        return;
+    }
+    
+    if (velocity > 127) {
+        logger_.log("MidiStateManager/pushNoteOn", "warn", 
+                   "Invalid velocity: " + juce::String(velocity) + ", clamped to 127");
+        velocity = 127;
+    }
+    
+    pushToQueue(noteOnQueues_[channel], note);
+    activeNotes_[note].store(true);
+    velocities_[channel][note] = velocity;
+    
+    logger_.log("MidiStateManager/pushNoteOn", "debug", 
+               "NoteOn ch=" + juce::String(channel) + 
+               " note=" + juce::String(note) + 
+               " vel=" + juce::String(velocity));
+}
+
+/**
+ * @brief PÅ™idÃ¡ note-off do queue a deaktivuje notu.
+ * @param channel MIDI kanÃ¡l (0-15)
+ * @param note MIDI nota (0-127)
+ */
+void MidiStateManager::pushNoteOff(uint8_t channel, uint8_t note) {
+    // PÅ™idÃ¡na validace
+    if (channel >= MIDI_CHANNELS) {
+        logger_.log("MidiStateManager/pushNoteOff", "warn", 
+                   "Invalid MIDI channel: " + juce::String(channel));
+        return;
+    }
+    
+    if (note >= MIDI_NOTES) {
+        logger_.log("MidiStateManager/pushNoteOff", "warn", 
+                   "Invalid MIDI note: " + juce::String(note));
+        return;
+    }
+    
+    pushToQueue(noteOffQueues_[channel], note);
+    activeNotes_[note].store(false);
+    
+    // Reset velocity pÅ™i note-off pro konzistenci
+    velocities_[channel][note] = 0;
+    
+    logger_.log("MidiStateManager/pushNoteOff", "debug", 
+               "NoteOff ch=" + juce::String(channel) + 
+               " note=" + juce::String(note));
+}
+
+/**
+ * @brief VytÃ¡hne note-on z queue pro danÃ½ kanÃ¡l.
+ * @param channel MIDI kanÃ¡l
+ * @return Nota (0-127) nebo 255 pokud prÃ¡zdnÃ¡ queue
+ */
+uint8_t MidiStateManager::popNoteOn(uint8_t channel) {
+    if (channel >= MIDI_CHANNELS) {
+        logger_.log("MidiStateManager/popNoteOn", "warn", 
+                   "Invalid MIDI channel: " + juce::String(channel));
+        return 255;
+    }
+    return popFromQueue(noteOnQueues_[channel]);
+}
+
+/**
+ * @brief VytÃ¡hne note-off z queue pro danÃ½ kanÃ¡l.
+ * @param channel MIDI kanÃ¡l
+ * @return Nota (0-127) nebo 255 pokud prÃ¡zdnÃ¡ queue
+ */
+uint8_t MidiStateManager::popNoteOff(uint8_t channel) {
+    if (channel >= MIDI_CHANNELS) {
+        logger_.log("MidiStateManager/popNoteOff", "warn", 
+                   "Invalid MIDI channel: " + juce::String(channel));
+        return 255;
+    }
+    return popFromQueue(noteOffQueues_[channel]);
+}
+
+/**
+ * @brief Zkontroluje, zda je nota aktivnÃ­.
+ * @param channel MIDI kanÃ¡l
+ * @param note MIDI nota
+ * @return True pokud aktivnÃ­
+ */
+bool MidiStateManager::isNoteActive(uint8_t channel, uint8_t note) const {
+    if (channel >= MIDI_CHANNELS || note >= MIDI_NOTES) {
+        return false;
+    }
+    return activeNotes_[note].load();
+}
+
+/**
+ * @brief VrÃ¡tÃ­ velocity aktivnÃ­ noty.
+ * @param channel MIDI kanÃ¡l
+ * @param note MIDI nota
+ * @return Velocity (0-127)
+ */
+uint8_t MidiStateManager::getVelocity(uint8_t channel, uint8_t note) const {
+    if (channel >= MIDI_CHANNELS || note >= MIDI_NOTES) {
+        return 0;
+    }
+    return velocities_[channel][note];
+}
+
+/**
+ * @brief NastavÃ­ hodnotu MIDI controlleru.
+ * @param channel MIDI kanÃ¡l
+ * @param controller ÄŒÃ­slo controlleru (0-127)
+ * @param value Hodnota (0-127)
+ */
+void MidiStateManager::setControllerValue(uint8_t channel, uint8_t controller, uint8_t value) {
+    if (channel >= MIDI_CHANNELS) {
+        logger_.log("MidiStateManager/setControllerValue", "warn", 
+                   "Invalid MIDI channel: " + juce::String(channel));
+        return;
+    }
+    
+    if (controller > 127) {
+        logger_.log("MidiStateManager/setControllerValue", "warn", 
+                   "Invalid controller: " + juce::String(controller));
+        return;
+    }
+    
+    if (value > 127) {
+        logger_.log("MidiStateManager/setControllerValue", "warn", 
+                   "Invalid controller value: " + juce::String(value) + 
+                   ", clamped to 127");
+        value = 127;
+    }
+    
+    controllerValues_[channel][controller] = value;
+    
+    // RozÅ¡Ã­Å™enÃ© logovÃ¡nÃ­ pro dÅ¯leÅ¾itÃ© controllery
+    juce::String controllerName;
+    switch (controller) {
+        case 7: controllerName = "Volume"; break;
+        case 10: controllerName = "Pan"; break;
+        case 11: controllerName = "Expression"; break;
+        case 64: controllerName = "Sustain"; break;
+        case 91: controllerName = "Reverb"; break;
+        case 93: controllerName = "Chorus"; break;
+        default: controllerName = "CC" + juce::String(controller); break;
+    }
+    
+    // Log jen dÅ¯leÅ¾itÃ© controllery nebo pÅ™i debug mÃ³du
+    if (controller == 7 || controller == 10 || controller == 64 || 
+        Logger::loggingEnabled.load()) {
+        logger_.log("MidiStateManager/setControllerValue", "debug", 
+                   "Ch" + juce::String(channel) + 
+                   " " + controllerName + "=" + juce::String(value));
+    }
+}
+
+/**
+ * @brief VrÃ¡tÃ­ hodnotu MIDI controlleru.
+ * @param channel MIDI kanÃ¡l
+ * @param controller ÄŒÃ­slo controlleru
+ * @return Hodnota (0-127)
+ */
+uint8_t MidiStateManager::getControllerValue(uint8_t channel, uint8_t controller) const {
+    if (channel >= MIDI_CHANNELS || controller > 127) {
+        return 0;
+    }
+    return controllerValues_[channel][controller];
+}
+
+/**
+ * @brief PÅ™idÃ¡ prvek do circular queue s automatickÃ½m pÅ™eteÄenÃ­m.
+ * @param queue Reference na queue
+ * @param note Hodnota k pÅ™idÃ¡nÃ­
+ * ZjednoduÅ¡eno: PouÅ¾Ã­vÃ¡ modulo pro index, atomic operace pro count.
+ */
+void MidiStateManager::pushToQueue(NoteQueue& queue, uint8_t note) {
+    std::lock_guard<std::mutex> lock(queue.mutex);
+
+    uint8_t currentCount = queue.count.load();
+    uint8_t writeIndex = queue.writeIndex.load();
+
+    // SprÃ¡vnÃ© Å™eÅ¡enÃ­ overflow s circular behavior
+    if (currentCount >= 256) {
+        // Queue je plnÃ¡ - pÅ™epÃ­Å¡eme nejstarÅ¡Ã­ zÃ¡znam (circular behavior)
+        queue.readIndex = (queue.readIndex + 1) % 256;
+        // SnÃ­Å¾Ã­me count o 1, protoÅ¾e pÅ™epÃ­Å¡eme starÃ½ zÃ¡znam
+        queue.count.store(255);
+        currentCount = 255;
+        
+        logger_.log("MidiStateManager/pushToQueue", "debug", 
+                   "Queue overflow - overwriting oldest record");
+    }
+
+    // ZÃ¡pis novÃ©ho zÃ¡znamu
+    queue.notes[writeIndex] = note;
+    queue.writeIndex.store((writeIndex + 1) % 256);
+    queue.count.store(currentCount + 1);
+}
+
+/**
+ * @brief VytÃ¡hne prvek z circular queue.
+ * @param queue Reference na queue
+ * @return Hodnota nebo 255 pÅ™i prÃ¡zdnÃ© queue
+ */
+uint8_t MidiStateManager::popFromQueue(NoteQueue& queue) {
+    std::lock_guard<std::mutex> lock(queue.mutex);
+
+    uint8_t currentCount = queue.count.load();
+    if (currentCount == 0) {
+        return 255;  // PrÃ¡zdnÃ¡ queue
+    }
+
+    // DodateÄnÃ¡ validace pÅ™ed ÄtenÃ­m
+    uint8_t readIndex = queue.readIndex;
+    if (readIndex >= 256) {
+        // NouzovÃ½ reset pÅ™i poÅ¡kozenÃ­ indexu
+        queue.readIndex = 0;
+        readIndex = 0;
+        logger_.log("MidiStateManager/popFromQueue", "warn", 
+                   "Emergency readIndex reset");
+    }
+
+    uint8_t note = queue.notes[readIndex];
+    queue.readIndex = (readIndex + 1) % 256;
+    
+    // BezpeÄnÃ© snÃ­Å¾enÃ­ count s kontrolou underflow
+    if (currentCount > 0) {
+        queue.count.store(currentCount - 1);
+    } else {
+        // NemÄ›lo by se stÃ¡t, ale pro jistotu
+        queue.count.store(0);
+        logger_.log("MidiStateManager/popFromQueue", "warn", 
+                   "Count underflow protection activated");
+    }
+    
+    return note;
+}
+
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
+
+
+===== File: MidiStateManager.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\MidiStateManager.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
+#include <atomic>
+#include <mutex>
+#include "Logger.h"
+
+// Konstanty pro MIDI rozsahy
+constexpr uint8_t MIDI_NOTES = 128;  // StandardnÃ­ poÄet MIDI not (0-127)
+constexpr uint8_t MIDI_CHANNELS = 16;  // StandardnÃ­ poÄet MIDI kanÃ¡lÅ¯
+
+/**
+ * @class MidiStateManager
+ * @brief Spravuje stav MIDI zprÃ¡v, vÄetnÄ› aktivnÃ­ch not, velocity, controllerÅ¯ a queue pro note-on/off.
+ * 
+ * Tato tÅ™Ã­da je thread-safe dÃ­ky mutexÅ¯m a atomic promÄ›nnÃ½m. Poskytuje metody pro push/pop MIDI udÃ¡lostÃ­,
+ * sledovÃ¡nÃ­ aktivnÃ­ch not a controller hodnot. Inicializuje vÃ½chozÃ­ hodnoty controllerÅ¯ podle MIDI standardu.
+ */
+class MidiStateManager
+{
+public:
+    MidiStateManager();
+
+    // Metody pro note-on/off
+    void pushNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);  // PÅ™idÃ¡ note-on do queue a aktualizuje stav
+    void pushNoteOff(uint8_t channel, uint8_t note);  // PÅ™idÃ¡ note-off do queue a aktualizuje stav
+    uint8_t popNoteOn(uint8_t channel);  // ðŸ”§ ZmÄ›na: ZmÄ›nÄ›no na uint8_t, vracÃ­ 255 pokud prÃ¡zdnÃ¡ (pro odstranÄ›nÃ­ warningu C4244)
+    uint8_t popNoteOff(uint8_t channel);  // ðŸ”§ ZmÄ›na: ZmÄ›nÄ›no na uint8_t, vracÃ­ 255 pokud prÃ¡zdnÃ¡
+
+    // Metody pro aktivnÃ­ noty
+    bool isNoteActive(uint8_t channel, uint8_t note) const;  // Zkontroluje, zda je nota aktivnÃ­
+    uint8_t getVelocity(uint8_t channel, uint8_t note) const;  // VrÃ¡tÃ­ velocity aktivnÃ­ noty
+
+    // Metody pro MIDI controllery
+    void setControllerValue(uint8_t channel, uint8_t controller, uint8_t value);  // NastavÃ­ hodnotu controlleru
+    uint8_t getControllerValue(uint8_t channel, uint8_t controller) const;  // VrÃ¡tÃ­ hodnotu controlleru
+
+private:
+    Logger& logger_;  // Reference na logger pro logovÃ¡nÃ­ udÃ¡lostÃ­
+
+    // Struktura pro circular buffer queue (zachovÃ¡na pro efektivitu a thread-safety)
+    struct NoteQueue {
+        std::array<uint8_t, 256> notes;  // Circular buffer o velikosti 256 (magickÃ© ÄÃ­slo zachovÃ¡no)
+        std::atomic<uint8_t> writeIndex{0};  // Atomic index pro zÃ¡pis (thread-safe)
+        std::atomic<uint8_t> count{0};  // PoÄet prvkÅ¯ v queue (atomic pro bezpeÄnÃ½ pÅ™Ã­stup)
+        uint8_t readIndex{0};  // Index pro ÄtenÃ­ (chrÃ¡nÄ›n mutexem)
+        mutable std::mutex mutex;  // Mutex pro synchronizaci pÅ™Ã­stupu
+
+        void reset();  // Resetuje queue na vÃ½chozÃ­ stav
+    };
+
+    // Queue pro note-on a note-off pro kaÅ¾dÃ½ kanÃ¡l
+    std::array<NoteQueue, MIDI_CHANNELS> noteOnQueues_;
+    std::array<NoteQueue, MIDI_CHANNELS> noteOffQueues_;
+
+    // Pole pro aktivnÃ­ noty a velocity
+    std::array<std::atomic<bool>, MIDI_NOTES> activeNotes_;  // Atomic pro thread-safety
+    std::array<std::array<uint8_t, MIDI_NOTES>, MIDI_CHANNELS> velocities_;  // Velocity pro kaÅ¾dÃ½ kanÃ¡l a notu
+    std::array<std::array<uint8_t, 128>, MIDI_CHANNELS> controllerValues_;  // Controller hodnoty
+
+    // InternÃ­ helper metody
+    void pushToQueue(NoteQueue& queue, uint8_t note);  // PÅ™idÃ¡ do queue s automatickÃ½m pÅ™eteÄenÃ­m
+    uint8_t popFromQueue(NoteQueue& queue);  // VytÃ¡hne z queue, vracÃ­ 255 pÅ™i prÃ¡zdnÃ©
+};
+
+
+===== File: PluginEditor.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\PluginEditor.cpp
+=====
+// PluginEditor.cpp - OpravenÃ¡ verze
+#include "PluginEditor.h"
+#include "PluginProcessor.h"
+#include "decorators/BinaryData.h"
+
+/**
+ * @brief Konstruktor editoru.
+ * Inicializuje komponenty GUI: checkbox pro debugging soubor, label cesty a embedovanÃ½ obrÃ¡zek.
+ * @param p Reference na audio procesor.
+ */
+AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor& p)
+    : AudioProcessorEditor(&p), audioProcessor(p)
+{
+    // EmbedovanÃ½ obrÃ¡zek z BinaryData (naÄtenÃ­ a nastavenÃ­)
+    juce::Image image = juce::ImageCache::getFromMemory(BinaryData::ithacaplayer1_jpg, BinaryData::ithacaplayer1_jpgSize);
+    imageComponent.setImage(image);
+    imageComponent.setImagePlacement(juce::RectanglePlacement::stretchToFit);  // âœ… NOVÃ‰: RoztÃ¡hni na celou plochu
+    addAndMakeVisible(imageComponent);
+
+    // Checkbox pro vytvÃ¡Å™enÃ­ debug souboru (Å™Ã­dÃ­ logovÃ¡nÃ­ do souboru)
+    addAndMakeVisible(loggingToggle);
+    loggingToggle.setToggleState(true, juce::dontSendNotification);
+    loggingToggle.onClick = [this] {
+        Logger::loggingEnabled.store(loggingToggle.getToggleState());
+    };
+
+    // Label pro zobrazenÃ­ relativnÃ­ cesty k log souboru (cross-platform)
+    addAndMakeVisible(logFilePathLabel);
+    juce::File logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("IthacaPlayer");
+    juce::File logFile = logDir.getChildFile("IthacaPlayer.log");
+    logFilePathLabel.setText(logFile.getParentDirectory().getFileName() + "/" + logFile.getFileName(), juce::dontSendNotification);
+    logFilePathLabel.setColour(juce::Label::textColourId, juce::Colours::white);  // âœ… ZMÄšNA: BÃ­lÃ½ text pro lepÅ¡Ã­ Äitelnost
+    logFilePathLabel.setColour(juce::Label::backgroundColourId, juce::Colours::black.withAlpha(0.7f));  // âœ… NOVÃ‰: PolotransparentnÃ­ pozadÃ­
+
+    // âœ… NOVÃ‰: Nastav prÅ¯hlednost checkboxu pro lepÅ¡Ã­ vzhled
+    loggingToggle.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+
+    setSize(400, 600);  // âœ… ZMÄšNA: ZvÄ›tÅ¡enÃ¡ vÃ½chozÃ­ velikost okna
+}
+
+/**
+ * @brief Destruktor editoru.
+ * Å½Ã¡dnÃ© speciÃ¡lnÃ­ uvolnÄ›nÃ­ zdrojÅ¯ (komponenty se uvolnÃ­ automaticky).
+ */
+AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
+{
+    // Å½Ã¡dnÃ© speciÃ¡lnÃ­ akce potÅ™ebnÃ©
+}
+
+/**
+ * @brief Maluje pozadÃ­ GUI.
+ * @param g GrafickÃ½ kontext pro malovÃ¡nÃ­.
+ */
+void AudioPluginAudioProcessorEditor::paint(juce::Graphics& g)
+{
+    // âœ… ZMÄšNA: Å½Ã¡dnÃ© pozadÃ­ - nechÃ¡me obrÃ¡zek jako pozadÃ­
+    // g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
+    
+    // âœ… NOVÃ‰: VolitelnÄ› mÅ¯Å¾eme pÅ™idat tlumenÃ½ overlay pro lepÅ¡Ã­ Äitelnost textu
+    g.setColour(juce::Colours::black.withAlpha(0.1f));
+    g.fillRect(getLocalBounds().removeFromTop(80));  // Jen hornÃ­ ÄÃ¡st pro controls
+}
+
+/**
+ * @brief Resized - nastavuje pozice komponent v GUI.
+ */
+void AudioPluginAudioProcessorEditor::resized()
+{
+    auto bounds = getLocalBounds();
+    
+    // âœ… KLÃÄŒOVÃ ZMÄšNA: ObrÃ¡zek zabÃ­rÃ¡ celou plochu
+    imageComponent.setBounds(bounds);
+    
+    // âœ… ZMÄšNA: Controls jsou overlay pÅ™es obrÃ¡zek
+    auto controlArea = bounds.removeFromTop(80).reduced(10);
+    
+    loggingToggle.setBounds(controlArea.removeFromTop(24));
+    logFilePathLabel.setBounds(controlArea.removeFromTop(24));
+}
+
+
+===== File: PluginEditor.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\PluginEditor.h
+=====
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
+#include "PluginProcessor.h"
+
+/**
+ * @class AudioPluginAudioProcessorEditor
+ * @brief Editor pluginu s jednoduchÃ½m GUI.
+ * 
+ * Obsahuje checkbox pro souborovÃ© logovÃ¡nÃ­ a embedovanÃ½ obrÃ¡zek.
+ * LogovÃ¡nÃ­ do GUI bylo odstranÄ›no, MIDI indikÃ¡tor vynechÃ¡n pro jednoduchost.
+ */
+class AudioPluginAudioProcessorEditor : public juce::AudioProcessorEditor
+{
+public:
+    AudioPluginAudioProcessorEditor(AudioPluginAudioProcessor&);
+    ~AudioPluginAudioProcessorEditor() override;
+
+    void paint(juce::Graphics&) override;
+    void resized() override;
+
+private:
+    AudioPluginAudioProcessor& audioProcessor;  // Reference na procesor
+
+    juce::ToggleButton loggingToggle{"Create file for debugging"};  // Checkbox pro logovÃ¡nÃ­ do souboru
+    juce::Label logFilePathLabel;  // Label pro zobrazenÃ­ relativnÃ­ cesty k log souboru
+
+    juce::ImageComponent imageComponent;  // Komponenta pro embedovanÃ½ obrÃ¡zek
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessorEditor)
+};
+
+
+===== File: PluginProcessor.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\PluginProcessor.cpp
+=====
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+#include <cstring>
+#include <cmath>
+
+/**
+ * @brief Konstruktor procesoru.
+ * Inicializuje komponenty a pÅ™ipravuje triple buffering.
+ */
+AudioPluginAudioProcessor::AudioPluginAudioProcessor()
+    : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true))
+    , logger_(Logger::getInstance())
+    , voiceManager_(sampleLibrary_)
+{
+    logger_.log("PluginProcessor/constructor", "info", "Procesor inicializovÃ¡n.");
+    sampleRate_ = 44100.0;
+    synthState_.store(SynthState::Uninitialized);
+    processingEnabled_.store(false);
+
+    // Inicializace triple buffering
+    for (auto& buffer : audioBuffers_) {
+        buffer.resize(8192 * 2, 0.0f); // Max velikost pro stereo
+    }
+    currentReadBuffer_.store(0);
+    currentWriteBuffer_.store(0);
+    isBufferReady_.store(false);
+
+    // Inicializace MIDI queue
+    midiReadIndex_.store(0);
+    midiWriteIndex_.store(0);
+}
+
+/**
+ * @brief Destruktor - uvolnÃ­ zdroje a ukonÄÃ­ render thread.
+ */
+AudioPluginAudioProcessor::~AudioPluginAudioProcessor() 
+{
+    logger_.log("PluginProcessor/destructor", "info", "Procesor uvolnÄ›n.");
+    stopRenderThread();
+    processingEnabled_.store(false);
+    synthState_.store(SynthState::Uninitialized);
+    sampleLibrary_.clear();
+}
+
+/**
+ * @brief PÅ™ipravÃ­ plugin na pÅ™ehrÃ¡vÃ¡nÃ­.
+ */
+void AudioPluginAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    logger_.log("PluginProcessor/prepareToPlay", "info", "PÅ™Ã­prava zahÃ¡jena.");
+    
+    if (sampleRate <= 0.0 || sampleRate > 192000.0 || samplesPerBlock <= 0 || samplesPerBlock > 8192) {
+        handleSynthError("NeplatnÃ© parametry.");
+        return;
+    }
+    
+    sampleRate_ = sampleRate;
+    samplesPerBlock_ = samplesPerBlock;
+    synthState_.store(SynthState::Initializing);
+    processingEnabled_.store(false);
+    
+    // Inicializace bufferÅ¯ podle samplesPerBlock
+    for (auto& buffer : audioBuffers_) {
+        buffer.resize(samplesPerBlock * 2, 0.0f); // Stereo: 2 kanÃ¡ly
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+    }
+    isBufferReady_.store(false);
+    
+    // Reset MIDI queue
+    clearMidiQueue();
+    
+    initializeSynth();
+    
+    if (synthState_.load() == SynthState::Ready) {
+        processingEnabled_.store(true);
+        startRenderThread();
+    }
+}
+
+/**
+ * @brief UvolnÃ­ zdroje.
+ */
+void AudioPluginAudioProcessor::releaseResources()
+{
+    logger_.log("PluginProcessor/releaseResources", "info", "UvolÅˆovÃ¡nÃ­ zdrojÅ¯.");
+    stopRenderThread();
+    processingEnabled_.store(false);
+    synthState_.store(SynthState::Uninitialized);
+}
+
+/**
+ * @brief Inicializuje syntetizÃ©r.
+ */
+void AudioPluginAudioProcessor::initializeSynth()
+{
+    if (synthState_.load() != SynthState::Initializing) return;
+    
+    logger_.log("PluginProcessor/initializeSynth", "info", "Inicializace zahÃ¡jena.");
+    
+    try {
+        if (sampleRate_ <= 0.0) throw std::runtime_error("NeplatnÃ½ sample rate.");
+        
+        // Kontrola existujÃ­cÃ­ch vzorkÅ¯
+        bool hasSamples = false;
+        for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
+            for (uint8_t level = 0; level < 8; ++level) {
+                if (sampleLibrary_.isNoteAvailable(note, level)) {
+                    hasSamples = true;
+                    break;
+                }
+            }
+            if (hasSamples) break;
+        }
+        
+        if (hasSamples) {
+            logger_.log("PluginProcessor/initializeSynth", "info", "Vzorky v pamÄ›ti - rychlÃ¡ inicializace.");
+        } else {
+            logger_.log("PluginProcessor/initializeSynth", "info", "NaÄÃ­tÃ¡nÃ­ vzorkÅ¯.");
+            auto progressCallback = [this](int current, int total, const juce::String&) {
+                if (current % 100 == 0 || current == total) {
+                    logger_.log("PluginProcessor/initializeSynth", "debug", 
+                                "PrÅ¯bÄ›h: " + juce::String(current) + "/" + juce::String(total));
+                }
+            };
+            sampleLibrary_.initialize(sampleRate_, progressCallback);
+        }
+        
+        // Kontrola dostupnosti
+        if (!hasSamples) {
+            for (uint8_t note = SampleLibrary::MIN_NOTE; note <= SampleLibrary::MAX_NOTE; ++note) {
+                for (uint8_t level = 0; level < 8; ++level) {
+                    if (sampleLibrary_.isNoteAvailable(note, level)) {
+                        hasSamples = true;
+                        break;
+                    }
+                }
+                if (hasSamples) break;
+            }
+            if (!hasSamples) throw std::runtime_error("Å½Ã¡dnÃ© vzorky.");
+        }
+        
+        synthState_.store(SynthState::Ready);
+        
+    } catch (const std::exception& e) {
+        handleSynthError("Chyba: " + juce::String(e.what()));
+        synthState_.store(SynthState::Error);
+    }
+}
+
+void AudioPluginAudioProcessor::handleSynthError(const juce::String& errorMessage)
+{
+    logger_.log("PluginProcessor/handleSynthError", "error", errorMessage);
+    processingEnabled_.store(false);
+}
+
+juce::String AudioPluginAudioProcessor::getStateDescription() const
+{
+    juce::String base;
+    switch (synthState_.load()) {
+        case SynthState::Uninitialized: base = "Uninitialized"; break;
+        case SynthState::Initializing: base = "Initializing"; break;
+        case SynthState::Ready: base = "Ready"; break;
+        case SynthState::Error: base = "Error"; break;
+        default: base = "Unknown";
+    }
+    base += " (Processing: " + juce::String(processingEnabled_.load() ? "ON" : "OFF") + ")";
+    return base;
+}
+
+void AudioPluginAudioProcessor::startRenderThread()
+{
+    if (!renderThread_.joinable()) {
+        shouldStop_.store(false);
+        renderThread_ = std::thread(&AudioPluginAudioProcessor::renderThreadFunction, this);
+        logger_.log("PluginProcessor/startRenderThread", "info", "Render thread spuÅ¡tÄ›n.");
+    }
+}
+
+void AudioPluginAudioProcessor::stopRenderThread()
+{
+    if (renderThread_.joinable()) {
+        shouldStop_.store(true);
+        renderSignal_.notify_one();
+        renderThread_.join();
+        logger_.log("PluginProcessor/stopRenderThread", "info", "Render thread ukonÄen.");
+    }
+}
+
+/**
+ * @brief Lock-free pÅ™idÃ¡nÃ­ MIDI eventu do queue.
+ */
+bool AudioPluginAudioProcessor::pushMidiEvent(const juce::MidiMessage& message, int samplePosition)
+{
+    const int currentWrite = midiWriteIndex_.load(std::memory_order_relaxed);
+    const int nextWrite = (currentWrite + 1) % MIDI_QUEUE_SIZE;
+    
+    if (nextWrite == midiReadIndex_.load(std::memory_order_acquire)) {
+        return false; // Queue je plnÃ¡
+    }
+    
+    midiQueue_[currentWrite] = {message, samplePosition};
+    midiWriteIndex_.store(nextWrite, std::memory_order_release);
+    return true;
+}
+
+/**
+ * @brief Lock-free ÄtenÃ­ MIDI eventu z queue.
+ */
+bool AudioPluginAudioProcessor::popMidiEvent(MidiEvent& event)
+{
+    const int currentRead = midiReadIndex_.load(std::memory_order_relaxed);
+    
+    if (currentRead == midiWriteIndex_.load(std::memory_order_acquire)) {
+        return false; // Queue je prÃ¡zdnÃ¡
+    }
+    
+    event = midiQueue_[currentRead];
+    midiReadIndex_.store((currentRead + 1) % MIDI_QUEUE_SIZE, std::memory_order_release);
+    return true;
+}
+
+void AudioPluginAudioProcessor::clearMidiQueue()
+{
+    midiReadIndex_.store(0);
+    midiWriteIndex_.store(0);
+}
+
+/**
+ * @brief ZpracovÃ¡nÃ­ MIDI v real-time threadu pro minimÃ¡lnÃ­ latenci.
+ */
+void AudioPluginAudioProcessor::processMidiInRealTime(const juce::MidiBuffer& midiMessages)
+{
+    for (const auto metadata : midiMessages) {
+        auto msg = metadata.getMessage();
+        pushMidiEvent(msg, metadata.samplePosition);
+    }
+    renderSignal_.notify_one(); // OkamÅ¾itÄ› probudit render thread
+}
+
+/**
+ * @brief KopÃ­rovÃ¡nÃ­ audio bufferu s optimalizacÃ­.
+ */
+void AudioPluginAudioProcessor::copyAudioBuffer(juce::AudioBuffer<float>& dest, const std::vector<float>& src)
+{
+    const int numSamples = dest.getNumSamples();
+    
+    if (src.size() >= numSamples * 2) {
+        // PouÅ¾itÃ­ memcpy pro rychlÃ© kopÃ­rovÃ¡nÃ­
+        std::memcpy(dest.getWritePointer(0), src.data(), numSamples * sizeof(float));
+        
+        if (dest.getNumChannels() >= 2) {
+            std::memcpy(dest.getWritePointer(1), src.data() + numSamples, 
+                       numSamples * sizeof(float));
+        }
+    }
+}
+
+/**
+ * @brief HlavnÃ­ render funkce threadu.
+ */
+void AudioPluginAudioProcessor::renderThreadFunction()
+{
+    juce::ScopedJuceInitialiser_GUI scopedJuce; // Pro bezpeÄnÃ© JUCE operace v threadu
+    
+    while (!shouldStop_.load()) {
+        // ÄŒekÃ¡nÃ­ s timeoutem 500Î¼s pro nÃ­zkou latenci
+        {
+            std::unique_lock<std::mutex> lock(renderMutex_);
+            renderSignal_.wait_for(lock, std::chrono::microseconds(500));
+        }
+        
+        if (shouldStop_.load()) break;
+
+        auto startTime = juce::Time::getMillisecondCounterHiRes();
+
+        // ZpracovÃ¡nÃ­ MIDI zprÃ¡v z lock-free queue
+        MidiEvent midiEvent;
+        bool hasProcessedMidi = false;
+        
+        while (popMidiEvent(midiEvent)) {
+            auto msg = midiEvent.message;
+            
+            if (msg.isNoteOn()) {
+                midiState_.pushNoteOn(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                      static_cast<uint8_t>(msg.getNoteNumber()), 
+                                      static_cast<uint8_t>(msg.getVelocity()));
+            } else if (msg.isNoteOff()) {
+                midiState_.pushNoteOff(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                       static_cast<uint8_t>(msg.getNoteNumber()));
+            } else if (msg.isController()) {
+                midiState_.setControllerValue(static_cast<uint8_t>(msg.getChannel() - 1), 
+                                              static_cast<uint8_t>(msg.getControllerNumber()), 
+                                              static_cast<uint8_t>(msg.getControllerValue()));
+            }
+            
+            hasProcessedMidi = true;
+        }
+
+        if (hasProcessedMidi) {
+            voiceManager_.processMidiEvents(midiState_);
+        }
+
+        // RenderovÃ¡nÃ­ audio pouze pokud je potÅ™eba
+        if (hasProcessedMidi || voiceManager_.getActiveVoiceCount() > 0) {
+            const int nextWriteBuffer = (currentWriteBuffer_.load() + 1) % BUFFER_COUNT;
+            
+            // VyÄistit buffer pÅ™ed renderovÃ¡nÃ­m
+            std::fill(audioBuffers_[nextWriteBuffer].begin(), 
+                     audioBuffers_[nextWriteBuffer].end(), 0.0f);
+            
+            // Renderovat audio
+            voiceManager_.generateAudio(audioBuffers_[nextWriteBuffer].data(), samplesPerBlock_);
+            
+            // Aktualizovat write buffer
+            currentWriteBuffer_.store(nextWriteBuffer);
+            isBufferReady_.store(true);
+        }
+
+        voiceManager_.refresh();
+
+        // MonitorovÃ¡nÃ­ vÃ½konu
+        const auto duration = juce::Time::getMillisecondCounterHiRes() - startTime;
+        if (duration > 2.0) {
+            logger_.log("PluginProcessor/renderThread", "warn", 
+                       "Render cyklus trval " + juce::String(duration, 1) + " ms");
+        }
+    }
+}
+
+/**
+ * @brief ZpracovÃ¡nÃ­ audio bloku s minimÃ¡lnÃ­ latencÃ­.
+ */
+void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    juce::ScopedNoDenormals noDenormals; // DÅ¯leÅ¾itÃ© pro vÃ½kon!
+    
+    if (!isReadyForProcessing()) {
+        buffer.clear();
+        return;
+    }
+
+    // 1. OkamÅ¾itÃ© zpracovÃ¡nÃ­ MIDI pro minimÃ¡lnÃ­ latenci
+    processMidiInRealTime(midiMessages);
+
+    // 2. KopÃ­rovÃ¡nÃ­ nejÄerstvÄ›jÅ¡Ã­ho bufferu
+    if (isBufferReady_.load()) {
+        const int readBuffer = currentReadBuffer_.load();
+        copyAudioBuffer(buffer, audioBuffers_[readBuffer]);
+        
+        // PÅ™epnout na dalÅ¡Ã­ buffer pro pÅ™Ã­Å¡tÃ­ iteraci
+        currentReadBuffer_.store((readBuffer + 1) % BUFFER_COUNT);
+    } else {
+        buffer.clear();
+    }
+
+    // 3. Pokud nenÃ­ co renderovat, vypnout signalizaci
+    if (midiMessages.isEmpty() && voiceManager_.getActiveVoiceCount() == 0) {
+        isBufferReady_.store(false);
+    }
+}
+
+juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
+{
+    logger_.log("PluginProcessor/createEditor", "info", "VytvÃ¡Å™enÃ­ editoru.");
+    return new AudioPluginAudioProcessorEditor(*this);
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new AudioPluginAudioProcessor();
+}
+
+
+===== File: PluginProcessor.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\PluginProcessor.h
+=====
+#pragma once
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <array>
+#include "SampleLibrary.h"
+#include "VoiceManager.h"
+#include "MidiStateManager.h"
+#include "Logger.h"
+
+// Enum pro stavy syntetizÃ©ru
+enum class SynthState {
+    Uninitialized,  // PoÄÃ¡teÄnÃ­ stav
+    Initializing,   // ProbÃ­hÃ¡ inicializace
+    Ready,          // PÅ™ipraveno k zpracovÃ¡nÃ­
+    Error           // KritickÃ¡ chyba
+};
+
+/**
+ * @class AudioPluginAudioProcessor
+ * @brief HlavnÃ­ audio procesor pluginu s optimalizovanÃ½m handlingem a triple buffering.
+ * 
+ * Spravuje inicializaci, audio/MIDI a zdroje. RefaktorovÃ¡no pro niÅ¾Å¡Ã­ latenci pomocÃ­
+ * triple buffering a samostatnÃ©ho render threadu s lock-free komunikacÃ­.
+ */
+class AudioPluginAudioProcessor : public juce::AudioProcessor
+{
+public:
+    AudioPluginAudioProcessor();
+    ~AudioPluginAudioProcessor() override;
+
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override;
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override { return true; }
+
+    const juce::String getName() const override { return JucePlugin_Name; }
+    bool acceptsMidi() const override { return true; }
+    bool producesMidi() const override { return false; }
+    bool isMidiEffect() const override { return false; }
+    double getTailLengthSeconds() const override { return 0.0; }
+
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+
+    juce::String getStateDescription() const;
+    bool isReadyForProcessing() const { 
+        return synthState_.load() == SynthState::Ready && processingEnabled_.load(); 
+    }
+    double getCurrentSampleRate() const { return sampleRate_; }
+    int getCurrentBufferSize() const { return samplesPerBlock_; }
+
+private:
+    Logger& logger_;
+    SampleLibrary sampleLibrary_;
+    VoiceManager voiceManager_;
+    MidiStateManager midiState_;
+
+    std::atomic<SynthState> synthState_{SynthState::Uninitialized};
+    std::atomic<bool> processingEnabled_{false};
+    
+    double sampleRate_{0.0};
+    int samplesPerBlock_{0};
+
+    // Triple buffering pro niÅ¾Å¡Ã­ latenci
+    static constexpr int BUFFER_COUNT = 3;
+    std::array<std::vector<float>, BUFFER_COUNT> audioBuffers_;
+    std::atomic<int> currentReadBuffer_{0};
+    std::atomic<int> currentWriteBuffer_{0};
+    std::atomic<bool> isBufferReady_{false};
+    
+    // Render thread a synchronizace
+    std::thread renderThread_;
+    std::atomic<bool> shouldStop_{false};
+    std::condition_variable renderSignal_;
+    std::mutex renderMutex_;
+    
+    // Lock-free MIDI komunikace
+    struct MidiEvent {
+        juce::MidiMessage message;
+        int samplePosition;
+    };
+    
+    static constexpr int MIDI_QUEUE_SIZE = 512;
+    std::array<MidiEvent, MIDI_QUEUE_SIZE> midiQueue_;
+    std::atomic<int> midiReadIndex_{0};
+    std::atomic<int> midiWriteIndex_{0};
+    std::mutex midiMutex_;
+
+    /**
+     * @brief Inicializuje syntetizÃ©r s kontrolou pamÄ›ti.
+     */
+    void initializeSynth();
+    void handleSynthError(const juce::String& errorMessage);
+    void startRenderThread();
+    void stopRenderThread();
+    void renderThreadFunction();
+
+    // Lock-free MIDI operace
+    bool pushMidiEvent(const juce::MidiMessage& message, int samplePosition);
+    bool popMidiEvent(MidiEvent& event);
+    void clearMidiQueue();
+
+    // PomocnÃ© metody pro efektivnÄ›jÅ¡Ã­ zpracovÃ¡nÃ­
+    void processMidiInRealTime(const juce::MidiBuffer& midiMessages);
+    void copyAudioBuffer(juce::AudioBuffer<float>& dest, const std::vector<float>& src);
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
+};
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
+
+
+===== File: README.md =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\README.md
+=====
+## Cesty na build soubory
+
+| Soubor                  | Artefact                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------- |
+| juce_vst3_helper        | .\build\Debug\juce_vst3_helper.exe                                                                |
+| IthacaPlayer            | .\build\IthacaPlayer_artefacts\Debug\IthacaPlayer_SharedCode.lib                                  |
+| IthacaPlayer_VST3       | .\build\IthacaPlayer_artefacts\Debug\VST3\IthacaPlayer.vst3\Contents\x86_64-win\IthacaPlayer.vst3 |
+| IthacaPlayer_Standalone | .\build\IthacaPlayer_artefacts\Debug\Standalone\IthacaPlayer.exe                                  |
+
+## Cesta na aplikaÄnÃ­ data
+
+WIN+R: %APPDATA%\IthacaPlayer  
+
+C:\Users\[uÅ¾ivatel]\AppData\Roaming\IthacaPlayer  
+
+Zde se uklÃ¡dajÃ­ generovanÃ© WAV soubory pro samples (v podsloÅ¾ce "instrument"), logy (IthacaPlayer.log) a dalÅ¡Ã­ data.
+
+## Tail aplikaÄnÃ­ho logu
+
+```
+Get-Content -Path C:\Users\nemej992\AppData\Roaming\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait
+```
+
+```
+Get-Content -Path "C:\Users\Jindrich Nemec\AppData\Roaming\IthacaPlayer\IthacaPlayer.log" -Tail 10 -Wait
+```
+
+## MIDI tools
+
+### VMPK
+
+VirtuÃ¡lnÃ­ MIDI klÃ¡vesnice pro testovÃ¡nÃ­. PouÅ¾ijte poÄÃ­taÄovou klÃ¡vesnici nebo myÅ¡ k hranÃ­ not a spojte s IthacaPlayer pÅ™es virtual MIDI porty.  
+
+https://vmpk.sourceforge.io/#Download  
+https://sourceforge.net/projects/vmpk/  
+
+### loopMIDI
+
+NÃ¡stroj pro vytvÃ¡Å™enÃ­ virtuÃ¡lnÃ­ch MIDI portÅ¯ na Windows pro propojenÃ­ aplikacÃ­ (napÅ™. VMPK s IthacaPlayer).  
+
+https://www.tobias-erichsen.de/software/loopmidi.html  
+
+## NastavenÃ­ vÃ½vojovÃ©ho prostÅ™edÃ­
+
+Pro kompilaci C++ projektu s CMakeLists.txt ve Visual Studio Code (VS Code) proveÄte nÃ¡sledujÃ­cÃ­ kroky: 
+
+PÅ™edpoklÃ¡dÃ¡ se instalace Visual Studio Build Tools s MSVC kompilÃ¡torem: [https://visualstudio.microsoft.com/cs/visual-cpp-build-tools/]) a CMake.  
+
+### PoÅ¾adavky  
+- Visual Studio Build Tools (MSVC kompilÃ¡tor).  
+- CMake nainstalovanÃ½ a pÅ™idÃ¡n do PATH (napÅ™. C:\Program Files\CMake\bin).  
+- VS Code.  
+
+### Kroky nastavenÃ­  
+1. **Instalace rozÅ¡Ã­Å™enÃ­ ve VS Code**:  
+   - OtevÅ™ete Extensions [Ctrl+Shift+X].  
+   - Nainstalujte pro podporu C++ syntaxe, IntelliSense a ladÄ›nÃ­ "C/C++ for Visual Studio Code" nebo "C/C++ Extension Pack" - integrace CMake.  
+   - Restartujte VS Code.
+
+2. **VÃ½bÄ›r kompilÃ¡toru (kit)**:  
+   - V Command Palette [Ctrl+Shift+P] napiÅ¡te "CMake: Select a Kit".  
+   - Vyberte [amd64] (64-bit) nebo ekvivalent podle potÅ™eby (napÅ™. x64 pro modernÃ­ systÃ©my).
+   
+3. **Konfigurace projektu**:  
+   - V Command Palette napiÅ¡te "CMake: Configure". To vygeneruje build soubory (obvykle ve sloÅ¾ce "build").  
+
+4. **Build projektu**:  
+   - V Command Palette napiÅ¡te "CMake: Build" nebo pouÅ¾ijte Shift+Ctrl+B (nynÃ­ nabÃ­dne CMake Ãºlohy).  
+
+---  
+
+# IthacaPlayer - Software Synthesizer  
+
+Audio plugin synthesizer implementovanÃ½ v JUCE frameworku s modulÃ¡rnÃ­ architekturou a pokroÄilÃ½m voice managementem. Podporuje MIDI vstup, generovÃ¡nÃ­ audio samplÅ¯ (fallback na sine vlny), dynamic levels (0-7) pro velocity mapping a ADSR-ready voice systÃ©m.
+
+## Architektura SystÃ©mu  
+
+### PÅ™ehled Komponent  
+
+```
+AudioPluginAudioProcessor (Main Controller)
+â”œâ”€â”€ SampleLibrary (Pre-computed Audio Storage)
+â”‚   â””â”€â”€ SampleLoader (Loading/Generating/Resampling WAV)
+â”œâ”€â”€ MidiStateManager (MIDI Event Processing - Thread-Safe)
+â”œâ”€â”€ VoiceManager (Advanced Voice Allocation & ADSR-Ready)
+â”œâ”€â”€ Logger (Debug & Monitoring with Circular Buffer)
+â””â”€â”€ PluginEditor (GUI Interface with Full-Screen Image)
+```
+
+## Core Komponenty  
+
+### 1. SampleLibrary  
+**ÃšÄel:** SprÃ¡va pre-computed audio samplÅ¯ pro MIDI noty (21-108) s podporou 8 dynamic levels.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- AutomatickÃ© generovÃ¡nÃ­ sine vln jako fallback.  
+- UklÃ¡dÃ¡nÃ­/resampling WAV souborÅ¯ do %APPDATA%\IthacaPlayer\instrument\ (podpora 44.1kHz a 48kHz).  
+- Velocity mapping na dynamic levels (0-7).  
+- Podpora mono/stereo samplÅ¯ s inteligentnÃ­m fallback.  
+
+### 2. SampleLoader  
+**ÃšÄel:** NaÄÃ­tÃ¡nÃ­/generovÃ¡nÃ­ samplÅ¯ s resamplingem a robustnÃ­m error handlingem.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- Naming convention: m[nota]-vel[level]-[sr].wav (napÅ™. m060-vel3-44.wav).  
+- Fallback: Pokud soubor chybÃ­, generuje sine pro 44.1kHz, resampluje na 48kHz a uklÃ¡dÃ¡.  
+- Spiral search pro dynamic levels s fallback na niÅ¾Å¡Ã­/vyÅ¡Å¡Ã­ ÃºrovnÄ›.  
+- Statistiky loadingu (naÄtenÃ©/generovanÃ© soubory, pamÄ›Å¥).  
+
+### 3. MidiStateManager (Opraveno)
+**ÃšÄel:** Thread-safe sprÃ¡va MIDI stavu (noty, velocity, controllery).  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- **Thread-safe circular buffers** s mutex protection a atomic operacemi.  
+- **Overflow handling** - automatickÃ© pÅ™episovÃ¡nÃ­ nejstarÅ¡Ã­ch zÃ¡znamÅ¯.  
+- **RobustnÃ­ validace** vÅ¡ech MIDI vstupÅ¯ s graceful error handling.  
+- Inicializace standard controller hodnot (volume=100, pan=64, sustain=0).  
+- Podpora 16 kanÃ¡lÅ¯ s kompletnÃ­ error protection.  
+
+### 4. VoiceManager (KompletnÄ› refaktorovÃ¡n)
+**ÃšÄel:** PokroÄilÃ½ voice management s ADSR-ready architekturou.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- **Voice State Management**: Inactive/Playing/Release states s automatickÃ½m lifecycle.  
+- **Intelligent Voice Allocation**:
+  1. Note restart detection (monofonie per nota)
+  2. Free voice allocation (nejlepÅ¡Ã­ dostupnÃ¡)
+  3. Release voice stealing (preferovanÃ©)
+  4. Playing voice stealing (last resort)
+- **Release Counter System**: MinimalistickÃ¡ implementace s ÄasovÃ½m limitem (100ms).  
+- **Priority Queue Management**: Sophisticated priorita pro voice stealing.  
+- **Comprehensive Statistics**: Real-time monitoring vÅ¡ech voice states.  
+- **Stereo/Mono Rendering**: OptimalizovanÃ© audio rendering s mix/duplicate logiku.  
+
+### 5. Logger (StabilizovÃ¡n)
+**ÃšÄel:** Thread-safe logovÃ¡nÃ­ s kruhovÃ½m bufferem.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- KruhovÃ½ buffer (100 vstupÅ¯) s overflow protection.  
+- ZÃ¡pis do souboru (IthacaPlayer.log v %APPDATA%) s rotacÃ­.  
+- Podpora ÃºrovnÃ­ (info/debug/error/warn) s intelligent filtering.  
+- Thread-safe s mutex protection.  
+- English debug messages, ÄeskÃ© komentÃ¡Å™e.  
+
+### 6. PluginProcessor (RobustnÃ­)
+**ÃšÄel:** HlavnÃ­ audio procesor s enhanced error handling.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- **RobustnÃ­ MIDI validation** s range checking a error recovery.  
+- **Thread-safe initialization** jen pÅ™i zmÄ›nÄ› sample rate/bufferu.  
+- **Graceful error handling** s try-catch protection.  
+- Podpora VST3/AU/Standalone formÃ¡tÅ¯.  
+
+### 7. PluginEditor (VylepÅ¡eno)
+**ÃšÄel:** GUI rozhranÃ­ s full-screen image support.  
+**KlÃ­ÄovÃ© vlastnosti:**  
+- **Full-screen background image** s stretch-to-fit scaling.  
+- **Overlay controls** s transparentnÃ­m pozadÃ­m pro lepÅ¡Ã­ Äitelnost.  
+- Toggle tlaÄÃ­tko pro zapnutÃ­/vypnutÃ­ logovÃ¡nÃ­.  
+- BÃ­lÃ½ text s semi-transparentnÃ­m pozadÃ­m pro kontrast.  
+- ZvÄ›tÅ¡enÃ¡ velikost okna (400x600) pro lepÅ¡Ã­ UX.  
+
+## ADSR Koncept a BudoucÃ­ RozÅ¡Ã­Å™enÃ­
+
+### AktuÃ¡lnÃ­ implementace: Release Counter
+- **MinimalistickÃ¡ varianta** pro rychlÃ© testovÃ¡nÃ­ a stabilizaci.
+- **Release timer**: 100ms (4800 samples @ 48kHz) bez fade-out.
+- **AutomatickÃ© cleanup**: Voices se uvolÅˆujÃ­ po vyprÅ¡enÃ­ release Äasu.
+- **Thread-safe lifecycle**: Smooth pÅ™echody mezi voice states.
+
+### PlÃ¡novanÃ¡ ADSR architektura
+```cpp
+// BudoucÃ­ modulÃ¡rnÃ­ design:
+class ADSREnvelope {
+    // SeparÃ¡tnÃ­ ADSR logika
+    EnvelopePhase: Attack/Decay/Sustain/Release
+    Parameters: attackTime, decayTime, sustainLevel, releaseTime
+    ExponenciÃ¡lnÃ­ decay algoritmus (nÃ¡sobenÃ­ 0.99, 0.98...)
+};
+
+// Integrace do SynthVoice:
+- Block-based decay s konfigurovatelnÃ½m koeficientem
+- Per-sample nebo per-block aplikace envelope
+- ModulÃ¡rnÃ­ pouÅ¾itÃ­ pro amplitude/filter/pitch modulation
+```
+
+### NavrÅ¾enÃ© varianty implementace:
+1. **Block-based decay**: KonstantnÃ­ gain per block s exponenciÃ¡lnÃ­m decay
+2. **Per-sample envelope**: PÅ™esnÄ›jÅ¡Ã­ ale CPU nÃ¡roÄnÄ›jÅ¡Ã­
+3. **Hybrid approach**: Kompromis mezi kvalitou a vÃ½konem
+
+## KritickÃ© opravy a vylepÅ¡enÃ­
+
+### Stability fixes:
+- **Circular buffer overflow** - opravena logika v MidiStateManager
+- **Race conditions** - eliminovÃ¡ny v voice allocation
+- **Memory safety** - robustnÃ­ null pointer checks
+- **Voice lifecycle** - automatickÃ© cleanup release voices
+
+### Performance optimalizace:
+- **Intelligent voice stealing** preferuje release voices pÅ™ed playing
+- **Spiral search fallback** pro dynamic levels
+- **Cached statistics** pro real-time monitoring
+- **Reduced logging noise** s batch processing
+
+### Audio kvalita:
+- **Stereo/mono handling** - vÅ¡echny kombinace sprÃ¡vnÄ› oÅ¡etÅ™eny
+- **Sample rate flexibility** - podpora 44.1kHz i 48kHz
+- **Dynamic level mapping** - pÅ™irozenÃ© chovÃ¡nÃ­ podle velocity
+
+## ZnÃ¡mÃ© limity a plÃ¡novanÃ¡ rozÅ¡Ã­Å™enÃ­
+
+### SouÄasnÃ© limity:
+- GenerovanÃ© samples jsou mono sine vlny (bez harmonickÃ½ch)
+- Release fÃ¡ze bez fade-out (jen ÄasovÃ½ limit)
+- MaximÃ¡lnÃ­ polyfonie 16 voices
+- Å½Ã¡dnÃ¡ reÃ¡lnÃ¡ modulace (LFO, filter)
+
+### PlÃ¡novanÃ¡ rozÅ¡Ã­Å™enÃ­:
+- **PlnÃ½ ADSR envelope systÃ©m** s konfigurovatelnou kÅ™ivkou
+- **Filter section** s cutoff/resonance modulation
+- **LFO system** pro vibrato/tremolo efekty
+- **Multi-sample support** pro realistickÃ© nÃ¡stroje
+- **Effects chain** (reverb, delay, chorus)
+
+## Binarni data
+
+V adresÃ¡Å™i decorators se nachÃ¡zejÃ­ binary data pro GUI:
+
+- **BinaryData.h/.cpp**: Auto-generovanÃ© soubory obsahujÃ­cÃ­ embedovanÃ½ obrÃ¡zek
+- **ithaca-player-1.jpg**: Background image (309202 bytes)
+- **Full-screen scaling**: AutomatickÃ© roztaÅ¾enÃ­ na celou plochu GUI
+
+## Development notes
+
+### Testing workflow:
+1. PouÅ¾ijte VMPK + loopMIDI pro MIDI testovÃ¡nÃ­
+2. Sledujte real-time log: `Get-Content -Path %APPDATA%\IthacaPlayer\IthacaPlayer.log -Tail 10 -Wait`
+3. Monitorujte voice allocation v debug vÃ½stupu
+4. Testujte voice stealing pÅ™i > 16 simultÃ¡nnÃ­ch notÃ¡ch
+
+### Debug priorities:
+- Voice state transitions (Playing â†’ Release â†’ Inactive)
+- MIDI validation a overflow handling
+- Memory usage pÅ™i loading velkÃ½ch sample sad
+- Audio quality pÅ™i voice stealing
+
+Projekt je pÅ™ipraven pro ADSR implementaci s modulÃ¡rnÃ­ architekturou.
+
+---
+
+# Poznamky k build JUCE
+
+https://cmake.org/download/
+https://trirpi.github.io/posts/developing-audio-plugins-with-juce-and-visual-studio-code/
+
+
+# pridani JUCE
+
+```
+git submodule add https://github.com/juce-framework/JUCE.git JUCE
+```
+
+```
+git submodule update --init
+```
+
+```
+cd JUCE
+cmake -B build
+cmake -B build -DJUCE_BUILD_EXTRAS=ON
+cmake --build build --target AudioPluginHost
+```
+
+# Visual Studio Code
+
+Build the Project 
+- Terminal > Run Build Task (or press Ctrl+Shift+B)
+
+Run Without Debugging 
+- 
+
+
+===== File: SampleLibrary.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\SampleLibrary.cpp
+=====
+#include "SampleLibrary.h"
+#include <cmath>
+
+/**
+ * @brief SampleLibrary constructor
+ */
+SampleLibrary::SampleLibrary()
+    : logger_(Logger::getInstance())
+{
+    logger_.log("SampleLibrary/constructor", "info", "SampleLibrary initialized with dynamic levels");
+}
+
+/**
+ * @brief Initializes sample library with hybrid loading system
+ */
+void SampleLibrary::initialize(double sampleRate, 
+                              std::function<void(int, int, const juce::String&)> progressCallback)
+{
+    if (sampleRate <= 0.0) {
+        logger_.log("SampleLibrary/initialize", "error", "Invalid sampleRate: " + juce::String(sampleRate));
+        throw std::invalid_argument("Invalid sampleRate");
+    }
+
+    auto startTime = juce::Time::getMillisecondCounterHiRes();
+    
+    sampleRate_ = sampleRate;
+    clear();
+
+    logger_.log("SampleLibrary/initialize", "info",
+                "Starting initialization with sample rate=" + juce::String(sampleRate_) + 
+                " using dynamic levels");
+
+    // Reset statistics
+    loadingStats_ = SampleLibraryStats();
+
+    try {
+        // Create SampleLoader
+        SampleLoader loader(sampleRate);
+        juce::File instrumentDir = SampleLoader::getDefaultInstrumentDirectory();
+        
+        // Ensure directory exists
+        if (!instrumentDir.exists()) {
+            if (!instrumentDir.createDirectory()) {
+                throw std::runtime_error("Cannot create instrument directory: " + 
+                                       instrumentDir.getFullPathName().toStdString());
+            }
+            logger_.log("SampleLibrary/initialize", "info", 
+                       "Created instrument directory: " + instrumentDir.getFullPathName());
+        }
+
+        // Progress callback wrapper s redukovanÃ½m loggingem
+        auto progressWrapper = [this, progressCallback](int current, int total, const juce::String& status) {
+            if (progressCallback) {
+                progressCallback(current, total, status);
+            }
+            // Log pouze kaÅ¾dÃ½ 100. sample pro snÃ­Å¾enÃ­ noise
+            if (current % 100 == 0 || current == total) {
+                logger_.log("SampleLibrary/initialize", "debug", 
+                           "Progress: " + juce::String(current) + "/" + juce::String(total) + 
+                           " - " + status);
+            }
+        };
+
+        // Load all samples
+        std::vector<LoadedSample> loadedSamples = loader.loadInstrument(instrumentDir, progressWrapper);
+        
+        // Store samples in internal structure
+        for (const auto& sample : loadedSamples) {
+            try {
+                storeSampleRam(sample);
+                loadingStats_.totalSamples++;
+                
+                if (sample.isGenerated) {
+                    loadingStats_.generatedSines++;
+                } else {
+                    loadingStats_.loadedFromFiles++;
+                }
+                
+            } catch (const std::exception& e) {
+                logger_.log("SampleLibrary/initialize", "error",
+                           "Error storing sample for note " + juce::String((int)sample.midiNote) + 
+                           " level " + juce::String((int)sample.dynamicLevel) + 
+                           ": " + juce::String(e.what()));
+            }
+        }
+        
+        // Adopt statistics from SampleLoader
+        const auto& loaderStats = loader.getLoadingStats();
+        loadingStats_.savedToFiles = loaderStats.filesSaved;
+        loadingStats_.totalMemoryUsed = getTotalMemoryUsage();
+        loadingStats_.loadingTimeSeconds = (juce::Time::getMillisecondCounterHiRes() - startTime) / 1000.0;
+
+        logger_.log("SampleLibrary/initialize", "info",
+                   "Initialization completed: " + loadingStats_.getDescription());
+        
+        // Check if we have any samples
+        if (loadingStats_.totalSamples == 0) {
+            throw std::runtime_error("No samples were loaded!");
+        }
+        
+        // Check availability of basic notes for debugging
+        AvailabilityInfo availInfo = getAvailabilityInfo();
+        logger_.log("SampleLibrary/initialize", "info",
+                   "Available notes: " + juce::String(availInfo.notesWithAnyLevel) + "/" + 
+                   juce::String(MAX_NOTE - MIN_NOTE + 1) + 
+                   " (mono: " + juce::String(availInfo.monoSamples) + 
+                   ", stereo: " + juce::String(availInfo.stereoSamples) + ")");
+        
+        // Log dynamic level distribution
+        juce::String levelDistribution = "Dynamic levels: ";
+        for (int i = 0; i < NUM_DYNAMIC_LEVELS; ++i) {
+            levelDistribution += "L" + juce::String(i) + ":" + juce::String(availInfo.levelCounts[i]) + " ";
+        }
+        logger_.log("SampleLibrary/initialize", "info", levelDistribution);
+        
+    } catch (const std::exception& e) {
+        logger_.log("SampleLibrary/initialize", "error",
+                   "Fatal error during initialization: " + juce::String(e.what()));
+        throw;
+    } catch (...) {
+        logger_.log("SampleLibrary/initialize", "error",
+                   "Unknown fatal error during initialization");
+        throw std::runtime_error("Unknown error during initialization");
+    }
+}
+
+/**
+ * @brief Clears all samples from memory
+ */
+void SampleLibrary::clear()
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    logger_.log("SampleLibrary/clear", "info", "Starting SampleLibrary clear operation");
+    
+    size_t totalFreed = 0;
+    int segmentsCleared = 0;
+    
+    for (auto& segment : sampleSegments_) {
+        if (segment.midiNote != 0) { // Segment has data
+            totalFreed += segment.getMemoryUsage();
+            segment.reset();
+            segmentsCleared++;
+        }
+    }
+
+    // Reset statistics
+    loadingStats_ = SampleLibraryStats();
+
+    logger_.log("SampleLibrary/clear", "info", 
+               "SampleLibrary cleared - freed " + juce::String(segmentsCleared) + 
+               " segments, " + juce::String(totalFreed / (1024*1024)) + "MB");
+}
+
+/**
+ * @brief Returns sample data for specific note and dynamic level
+ */
+const float* SampleLibrary::getSampleData(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return nullptr;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].getLayerData(dynamicLevel);
+}
+
+/**
+ * @brief Returns sample length for specific note and dynamic level
+ */
+uint32_t SampleLibrary::getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].getLayerLength(dynamicLevel);
+}
+
+/**
+ * @brief Checks availability of specific dynamic level
+ */
+bool SampleLibrary::isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return false;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].isLayerAvailable(dynamicLevel);
+}
+
+/**
+ * @brief Checks if sample is stereo
+ */
+bool SampleLibrary::isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const
+{
+    if (!isValidNote(midiNote) || !isValidDynamicLevel(dynamicLevel)) {
+        return false;
+    }
+    
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    return sampleSegments_[midiNote].isLayerStereo(dynamicLevel);
+}
+
+/**
+ * @brief Stores loaded sample into RAM-based internal structure s redukovanÃ½m loggingem
+ */
+void SampleLibrary::storeSampleRam(const LoadedSample& sample)
+{
+    if (!isValidNote(sample.midiNote) || !isValidDynamicLevel(sample.dynamicLevel)) {
+        throw std::invalid_argument("Invalid MIDI note or dynamic level");
+    }
+    
+    if (!sample.audioData || sample.lengthSamples == 0) {
+        throw std::invalid_argument("Invalid sample data");
+    }
+
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    SampleSegment& segment = sampleSegments_[sample.midiNote];
+    segment.midiNote = sample.midiNote;
+    
+    // Copy data (necessary due to unique_ptr)
+    size_t totalSamples = static_cast<size_t>(sample.lengthSamples) * sample.numChannels;
+    auto dataCopy = std::make_unique<float[]>(totalSamples);
+    std::copy(sample.audioData.get(), 
+              sample.audioData.get() + totalSamples, 
+              dataCopy.get());
+    
+    bool isStereo = (sample.numChannels == 2);
+    segment.storeLayer(sample.dynamicLevel, std::move(dataCopy), sample.lengthSamples, isStereo);
+    
+    // OPRAVA: Drasticky redukovanÃ© logging - pouze kaÅ¾dÃ½ch 200 samples
+    static int storeCounter = 0;
+    if (++storeCounter % 200 == 0) {
+        logger_.log("SampleLibrary/storeSampleRam", "debug",
+                   "Batch stored " + juce::String(storeCounter) + " samples in RAM " +
+                   "(latest: note " + juce::String((int)sample.midiNote) + 
+                   " level " + juce::String((int)sample.dynamicLevel) + 
+                   ", " + juce::String(sample.lengthSamples) + " samples, " +
+                   juce::String(isStereo ? "stereo" : "mono") + ")");
+    }
+}
+
+/**
+ * @brief Maps MIDI velocity to dynamic level
+ */
+uint8_t SampleLibrary::velocityToDynamicLevel(uint8_t velocity)
+{
+    return SampleLoader::velocityToDynamicLevel(velocity);
+}
+
+/**
+ * @brief Returns total memory usage in bytes
+ */
+size_t SampleLibrary::getTotalMemoryUsage() const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    size_t total = 0;
+    for (const auto& segment : sampleSegments_) {
+        total += segment.getMemoryUsage();
+    }
+    
+    return total;
+}
+
+/**
+ * @brief Returns count of available notes
+ */
+int SampleLibrary::getAvailableNoteCount() const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    int count = 0;
+    for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
+        // Count note as available if it has at least one dynamic level
+        bool hasAnyLevel = false;
+        for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
+            if (sampleSegments_[note].isLayerAvailable(level)) {
+                hasAnyLevel = true;
+                break;
+            }
+        }
+        if (hasAnyLevel) {
+            count++;
+        }
+    }
+    
+    return count;
+}
+
+/**
+ * @brief Returns detailed information about available dynamic levels
+ */
+SampleLibrary::AvailabilityInfo SampleLibrary::getAvailabilityInfo() const
+{
+    std::lock_guard<std::mutex> lock(accessMutex_);
+    
+    AvailabilityInfo info;
+    info.totalNotes = MAX_NOTE - MIN_NOTE + 1;
+    
+    for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
+        bool hasAnyLevel = false;
+        
+        for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
+            if (sampleSegments_[note].isLayerAvailable(level)) {
+                hasAnyLevel = true;
+                info.levelCounts[level]++;
+                
+                if (sampleSegments_[note].isLayerStereo(level)) {
+                    info.stereoSamples++;
+                } else {
+                    info.monoSamples++;
+                }
+            }
+        }
+        
+        if (hasAnyLevel) {
+            info.notesWithAnyLevel++;
+        }
+    }
+    
+    return info;
+}
+
+
+===== File: SampleLibrary.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\SampleLibrary.h
+=====
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include <memory>
+#include <array>
+#include <mutex>
+#include "Logger.h"
+#include "SampleLoader.h"
+
+/**
+ * @struct SampleSegment
+ * @brief Container for 8 dynamic levels of a single MIDI note with stereo support
+ * 
+ * Each MIDI note has 8 dynamic levels (vel0-vel7) with different amplitudes.
+ * Each level can have different length and can be mono or stereo.
+ */
+struct SampleSegment
+{
+    std::array<std::unique_ptr<float[]>, 8> dynamicLayers;      // 8 dynamic levels
+    std::array<uint32_t, 8> layerLengthSamples;                // Length of each level
+    std::array<bool, 8> layerAllocated;                        // Whether level is allocated
+    std::array<bool, 8> layerIsStereo;                         // Whether level is stereo
+    uint8_t midiNote;                                           // MIDI note of this segment
+    
+    SampleSegment() : layerLengthSamples{}, layerAllocated{}, layerIsStereo{}, midiNote(0) {}
+    
+    /**
+     * @brief Returns length of specific dynamic level
+     */
+    uint32_t getLayerLength(uint8_t dynamicLevel) const {
+        return (dynamicLevel < 8) ? layerLengthSamples[dynamicLevel] : 0;
+    }
+    
+    /**
+     * @brief Returns data of specific dynamic level
+     */
+    const float* getLayerData(uint8_t dynamicLevel) const {
+        return (dynamicLevel < 8 && layerAllocated[dynamicLevel]) 
+               ? dynamicLayers[dynamicLevel].get() : nullptr;
+    }
+    
+    /**
+     * @brief Checks if dynamic level is available
+     */
+    bool isLayerAvailable(uint8_t dynamicLevel) const {
+        return (dynamicLevel < 8) && layerAllocated[dynamicLevel];
+    }
+    
+    /**
+     * @brief Checks if dynamic level is stereo
+     */
+    bool isLayerStereo(uint8_t dynamicLevel) const {
+        return (dynamicLevel < 8) && layerIsStereo[dynamicLevel];
+    }
+    
+    /**
+     * @brief Stores sample into specific dynamic level
+     */
+    void storeLayer(uint8_t dynamicLevel, std::unique_ptr<float[]> data, uint32_t length, bool isStereo) {
+        if (dynamicLevel < 8) {
+            dynamicLayers[dynamicLevel] = std::move(data);
+            layerLengthSamples[dynamicLevel] = length;
+            layerAllocated[dynamicLevel] = true;
+            layerIsStereo[dynamicLevel] = isStereo;
+        }
+    }
+    
+    /**
+     * @brief Resets all dynamic levels
+     */
+    void reset() {
+        for (int i = 0; i < 8; ++i) {
+            dynamicLayers[i].reset();
+            layerLengthSamples[i] = 0;
+            layerAllocated[i] = false;
+            layerIsStereo[i] = false;
+        }
+        midiNote = 0;
+    }
+    
+    /**
+     * @brief Calculates total memory usage of this segment
+     */
+    size_t getMemoryUsage() const {
+        size_t total = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (layerAllocated[i]) {
+                total += layerLengthSamples[i] * sizeof(float) * (layerIsStereo[i] ? 2 : 1);
+            }
+        }
+        return total;
+    }
+};
+
+/**
+ * @struct LoadingStats
+ * @brief Extended loading process statistics for SampleLibrary
+ */
+struct SampleLibraryStats
+{
+    int totalSamples;           // Total number of loaded samples
+    int loadedFromFiles;        // Number loaded from WAV files
+    int generatedSines;         // Number of generated sine waves
+    int savedToFiles;           // Number of saved generated files
+    size_t totalMemoryUsed;     // Total memory usage in bytes
+    double loadingTimeSeconds;  // Total loading time
+    
+    SampleLibraryStats() : totalSamples(0), loadedFromFiles(0), generatedSines(0), 
+                          savedToFiles(0), totalMemoryUsed(0), loadingTimeSeconds(0.0) {}
+    
+    /**
+     * @brief Returns human-readable description of statistics
+     */
+    juce::String getDescription() const {
+        return "Samples: " + juce::String(totalSamples) + 
+               " (WAV: " + juce::String(loadedFromFiles) + 
+               ", Generated: " + juce::String(generatedSines) + 
+               ", Saved: " + juce::String(savedToFiles) + ")" +
+               ", Memory: " + juce::String(totalMemoryUsed / (1024*1024)) + "MB" +
+               ", Time: " + juce::String(loadingTimeSeconds, 2) + "s";
+    }
+};
+
+/**
+ * @class SampleLibrary
+ * @brief Refactored sample library with dynamic levels support and hybrid loading
+ * 
+ * Key features:
+ * - 8 dynamic levels per MIDI note (vel0-vel7)
+ * - Hybrid loading: WAV files + fallback sine generation
+ * - Variable length samples (each level can have different length)
+ * - Stereo/mono support with automatic conversion
+ * - Automatic saving of generated samples
+ * - Thread-safe access with mutex
+ * - Detailed loading statistics
+ */
+class SampleLibrary
+{
+public:
+    SampleLibrary();
+    ~SampleLibrary() = default;
+
+    // === Main Interface ===
+    
+    /**
+     * @brief Initializes sample library with hybrid loading system
+     * @param sampleRate Target sample rate
+     * @param progressCallback Callback for progress reporting
+     */
+    void initialize(double sampleRate, 
+                   std::function<void(int, int, const juce::String&)> progressCallback = nullptr);
+
+    /**
+     * @brief Clears all samples (frees memory)
+     */
+    void clear();
+
+    // === Extended API for dynamic levels with stereo support ===
+    
+    /**
+     * @brief Returns sample data for specific note and dynamic level
+     * @param midiNote MIDI note (21-108)
+     * @param dynamicLevel Dynamic level (0-7)
+     * @return Pointer to audio data or nullptr
+     */
+    const float* getSampleData(uint8_t midiNote, uint8_t dynamicLevel) const;
+    
+    /**
+     * @brief Returns sample length for specific note and dynamic level
+     * @param midiNote MIDI note
+     * @param dynamicLevel Dynamic level
+     * @return Length in samples or 0
+     */
+    uint32_t getSampleLength(uint8_t midiNote, uint8_t dynamicLevel) const;
+    
+    /**
+     * @brief Checks availability of specific dynamic level
+     * @param midiNote MIDI note
+     * @param dynamicLevel Dynamic level
+     * @return true if available
+     */
+    bool isNoteAvailable(uint8_t midiNote, uint8_t dynamicLevel) const;
+    
+    /**
+     * @brief Checks if sample is stereo
+     * @param midiNote MIDI note
+     * @param dynamicLevel Dynamic level
+     * @return true if stereo
+     */
+    bool isSampleStereo(uint8_t midiNote, uint8_t dynamicLevel) const;
+
+    // === Backward compatibility (uses dynamic level 0) ===
+    
+    const float* getSampleData(uint8_t midiNote) const {
+        return getSampleData(midiNote, 0);
+    }
+    
+    uint32_t getSampleLength(uint8_t midiNote) const {
+        return getSampleLength(midiNote, 0);
+    }
+    
+    bool isNoteAvailable(uint8_t midiNote) const {
+        return isNoteAvailable(midiNote, 0);
+    }
+
+    // === Utility methods ===
+    
+    /**
+     * @brief Maps MIDI velocity to dynamic level
+     * @param velocity MIDI velocity (0-127)
+     * @return Dynamic level (0-7)
+     */
+    static uint8_t velocityToDynamicLevel(uint8_t velocity);
+    
+    /**
+     * @brief Returns loading statistics
+     */
+    const SampleLibraryStats& getLoadingStats() const { return loadingStats_; }
+    
+    /**
+     * @brief Returns total memory usage
+     */
+    size_t getTotalMemoryUsage() const;
+    
+    /**
+     * @brief Returns count of available notes
+     */
+    int getAvailableNoteCount() const;
+    
+    /**
+     * @brief Returns detailed information about available dynamic levels
+     */
+    struct AvailabilityInfo {
+        int totalNotes;
+        int notesWithAnyLevel;
+        std::array<int, 8> levelCounts;  // Count of notes for each level
+        int monoSamples;
+        int stereoSamples;
+        
+        AvailabilityInfo() : totalNotes(0), notesWithAnyLevel(0), levelCounts{}, 
+                            monoSamples(0), stereoSamples(0) {}
+    };
+    
+    AvailabilityInfo getAvailabilityInfo() const;
+
+    // === Constants ===
+    
+    static constexpr uint8_t MIN_NOTE = 21;        // A0
+    static constexpr uint8_t MAX_NOTE = 108;       // C8
+    static constexpr uint8_t NUM_DYNAMIC_LEVELS = 8;
+    static constexpr double SAMPLE_SECONDS = 12.0; // Length of generated samples
+
+private:
+    // === Private members ===
+    
+    mutable std::mutex accessMutex_;                        // Thread safety
+    std::array<SampleSegment, 128> sampleSegments_;        // Storage for all MIDI notes
+    double sampleRate_{44100.0};                           // Current sample rate
+    Logger& logger_;                                        // Reference to logger
+    SampleLibraryStats loadingStats_;                      // Loading statistics
+    
+    // === Private methods ===
+    
+    /**
+     * @brief Stores loaded sample into RAM-based internal structure
+     * 
+     * This method copies audio data from LoadedSample into the internal
+     * RAM-based storage structure (sampleSegments_). It does NOT save
+     * to disk - that's handled by SampleLoader.
+     * 
+     * @param sample Loaded sample to store in RAM
+     */
+    void storeSampleRam(const LoadedSample& sample);
+    
+    /**
+     * @brief Validates MIDI note and dynamic level
+     */
+    bool isValidNote(uint8_t midiNote) const {
+        return midiNote >= MIN_NOTE && midiNote <= MAX_NOTE;
+    }
+    
+    bool isValidDynamicLevel(uint8_t dynamicLevel) const {
+        return dynamicLevel < NUM_DYNAMIC_LEVELS;
+    }
+};
+
+
+===== File: SampleLoader.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\SampleLoader.cpp
+=====
+#include "SampleLoader.h"
+#include <cmath>  // Pro std::sin, std::pow atd.
+
+// Definice konstant
+const float SampleLoader::DYNAMIC_AMPLITUDES[8] = {0.05f, 0.1f, 0.2f, 0.3f, 0.4f, 0.6f, 0.8f, 1.0f};
+
+/**
+ * @brief Konstruktor SampleLoader.
+ * Inicializuje format manager a logger.
+ */
+SampleLoader::SampleLoader(double sampleRate)
+    : sampleRate_(sampleRate), logger_(Logger::getInstance())
+{
+    formatManager_.registerBasicFormats();  // Registrace WAV atd.
+}
+
+/**
+ * @brief NaÄte kompletnÃ­ instrument s optimalizovanÃ½m loading procesem.
+ * Iteruje pÅ™es noty a levels s batch processing pro rychlost.
+ */
+std::vector<LoadedSample> SampleLoader::loadInstrument(
+    const juce::File& instrumentDirectory,
+    ProgressCallback progressCallback
+) {
+    std::vector<LoadedSample> loadedSamples;
+    loadingStats_ = LoadingStats{};  // Reset statistik
+    
+    double startTime = juce::Time::getMillisecondCounterHiRes();
+    loadingStats_.totalExpected = (MAX_NOTE - MIN_NOTE + 1) * NUM_DYNAMIC_LEVELS;
+    
+    // OPTIMALIZACE: PÅ™edalokace vektoru pro eliminaci realokacÃ­
+    loadedSamples.reserve(loadingStats_.totalExpected);
+    
+    // VytvoÅ™enÃ­ directory pokud neexistuje
+    if (!instrumentDirectory.exists()) {
+        if (!instrumentDirectory.createDirectory()) {
+            logger_.log("SampleLoader/loadInstrument", "error", 
+                       "Cannot create instrument directory: " + instrumentDirectory.getFullPathName());
+            return loadedSamples;
+        }
+        logger_.log("SampleLoader/loadInstrument", "info", 
+                   "Created instrument directory");
+    }
+    
+    int processed = 0;
+    int batchLogCounter = 0;
+    
+    // NaÄtenÃ­ vÅ¡ech kombinacÃ­ nota Ã— dynamic level s optimalizovanÃ½m reportingem
+    for (uint8_t note = MIN_NOTE; note <= MAX_NOTE; ++note) {
+        for (uint8_t level = 0; level < NUM_DYNAMIC_LEVELS; ++level) {
+            try {
+                // Progress callback optimalizace - pouze kaÅ¾dÃ½ch 50 samples nebo prvnÃ­/poslednÃ­
+                if (progressCallback && (processed % 50 == 0 || processed < 10 || processed == loadingStats_.totalExpected - 1)) {
+                    juce::String status = "Loading note " + juce::String((int)note) + 
+                                        " level " + juce::String((int)level) + 
+                                        " (" + juce::String(processed + 1) + "/" + juce::String(loadingStats_.totalExpected) + ")";
+                    progressCallback(processed, loadingStats_.totalExpected, status);
+                }
+                
+                LoadedSample sample = loadSingleSample(instrumentDirectory, note, level);
+                loadedSamples.emplace_back(std::move(sample));  // PouÅ¾ij move pro pÅ™esun
+                
+                // Update statistik
+                loadingStats_.totalMemoryUsed += loadedSamples.back().getDataSize();
+                if (loadedSamples.back().isGenerated) {
+                    loadingStats_.filesGenerated++;
+                } else {
+                    loadingStats_.filesLoaded++;
+                }
+                
+                ++processed;
+                
+                // Batch logging kaÅ¾dÃ½ch 100 samples pro snÃ­Å¾enÃ­ noise
+                if (++batchLogCounter >= 100) {
+                    logger_.log("SampleLoader/loadInstrument", "debug", 
+                               "Batch progress: " + juce::String(processed) + "/" + juce::String(loadingStats_.totalExpected) + 
+                               " samples processed");
+                    batchLogCounter = 0;
+                }
+                
+            } catch (const std::exception& e) {
+                logger_.log("SampleLoader/loadInstrument", "error",
+                           "Error loading note " + juce::String((int)note) + 
+                           " level " + juce::String((int)level) + ": " + juce::String(e.what()));
+                ++processed; // PokraÄujeme i pÅ™i chybÄ›
+            }
+        }
+    }
+    
+    // FinÃ¡lnÃ­ statistiky
+    loadingStats_.loadingTimeSeconds = (juce::Time::getMillisecondCounterHiRes() - startTime) / 1000.0;
+    double samplesPerSecond = (loadingStats_.loadingTimeSeconds > 0) ? (processed / loadingStats_.loadingTimeSeconds) : 0;
+    
+    logger_.log("SampleLoader/loadInstrument", "info",
+               "Loading completed: " + juce::String(loadingStats_.filesLoaded) + " loaded, " +
+               juce::String(loadingStats_.filesGenerated) + " generated, " +
+               juce::String(loadingStats_.filesSaved) + " saved, " +
+               juce::String(loadingStats_.totalMemoryUsed / (1024*1024)) + "MB, " +
+               juce::String(loadingStats_.loadingTimeSeconds, 2) + "s" +
+               " (avg: " + juce::String(samplesPerSecond, 1) + " samples/sec)");
+    
+    return loadedSamples;
+}
+
+/**
+ * @brief NaÄte jeden konkrÃ©tnÃ­ sample s optimalizovanou fallback logikou.
+ * PokusÃ­ se naÄÃ­st pro target SR, fallback na base SR s resamplingem a uklÃ¡dÃ¡nÃ­m.
+ */
+LoadedSample SampleLoader::loadSingleSample(
+    const juce::File& instrumentDirectory,
+    uint8_t midiNote, 
+    uint8_t dynamicLevel
+) {
+    double baseSR = 44100.0;
+    double otherSR = (std::abs(sampleRate_ - 44100.0) < 1.0) ? 48000.0 : 44100.0;
+    
+    // 1. Zkus target SR
+    juce::String targetFilename = generateFilename(midiNote, dynamicLevel, sampleRate_);
+    juce::File targetFile = instrumentDirectory.getChildFile(targetFilename);
+    if (targetFile.exists()) {
+        LoadedSample sample = loadWavFile(targetFile, midiNote, dynamicLevel);
+        
+        // RedukovanÃ© logging - pouze kaÅ¾dÃ½ 200. ÃºspÄ›Å¡nÃ½ load
+        static int successCounter = 0;
+        if (++successCounter % 200 == 0) {
+            logger_.log("SampleLoader/loadSingleSample", "debug",
+                       "Batch: loaded " + juce::String(successCounter) + " files from disk");
+        }
+        
+        return sample;
+    }
+    
+    // 2. Zkus other SR a resampluj
+    juce::String otherFilename = generateFilename(midiNote, dynamicLevel, otherSR);
+    juce::File otherFile = instrumentDirectory.getChildFile(otherFilename);
+    if (otherFile.exists()) {
+        LoadedSample otherSample = loadWavFile(otherFile, midiNote, dynamicLevel);  // NaÄti a resampluj internÄ›
+        saveGeneratedSample(otherSample, targetFile);  // UloÅ¾ resamplovanou verzi pro target
+        loadingStats_.filesSaved++;
+        
+        logger_.log("SampleLoader/loadSingleSample", "info",
+                   "Fallback resampling: " + otherFilename + " -> " + targetFilename);
+        return otherSample;
+    }
+    
+    // 3. Generuj pro base (44100)
+    LoadedSample baseSample = generateSineWave(midiNote, dynamicLevel);  // Generuj pro baseSR
+    baseSample.originalSampleRate = baseSR;
+    juce::String baseFilename = generateFilename(midiNote, dynamicLevel, baseSR);
+    juce::File baseFile = instrumentDirectory.getChildFile(baseFilename);
+    saveGeneratedSample(baseSample, baseFile);  // UloÅ¾ base
+    loadingStats_.filesSaved++;
+    
+    // 4. Resampluj na 48000 a uloÅ¾
+    uint32_t resampledLength;
+    auto resampledData = resampleIfNeeded(baseSample.audioData.get(), baseSample.lengthSamples, baseSR, resampledLength);
+    LoadedSample resampledSample(std::move(baseSample));  // PouÅ¾ij move konstruktor
+    resampledSample.audioData = std::move(resampledData);
+    resampledSample.lengthSamples = resampledLength;
+    resampledSample.originalSampleRate = 48000.0;
+    juce::String resampledFilename = generateFilename(midiNote, dynamicLevel, 48000.0);
+    juce::File resampledFile = instrumentDirectory.getChildFile(resampledFilename);
+    saveGeneratedSample(resampledSample, resampledFile);
+    loadingStats_.filesSaved++;
+    
+    // Logging pouze pro generovanÃ© samples
+    static int generateCounter = 0;
+    if (++generateCounter % 50 == 0) {
+        logger_.log("SampleLoader/loadSingleSample", "info",
+                   "Generated " + juce::String(generateCounter) + " sine wave samples");
+    }
+    
+    // VrÃ¡tÃ­me verzi pro target SR
+    return (std::abs(sampleRate_ - baseSR) < 1.0) ? std::move(baseSample) : std::move(resampledSample);
+}
+
+/**
+ * @brief NaÄte WAV soubor s optimalizovanÃ½m resampling procesem.
+ */
+LoadedSample SampleLoader::loadWavFile(const juce::File& file, uint8_t midiNote, uint8_t dynamicLevel) {
+    FileAnalysis analysis = analyzeWavFile(file);
+    if (!analysis.isValid) {
+        throw std::runtime_error("Invalid WAV file: " + analysis.errorMessage.toStdString());
+    }
+    
+    LoadedSample result;
+    result.midiNote = midiNote;
+    result.dynamicLevel = dynamicLevel;
+    result.isGenerated = false;
+    result.sourcePath = file.getFullPathName();
+    result.originalSampleRate = analysis.originalSampleRate;
+    result.lengthSamples = analysis.targetLengthSamples;
+    
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+    if (!reader) {
+        throw std::runtime_error("Cannot create reader for: " + file.getFullPathName().toStdString());
+    }
+    
+    result.numChannels = static_cast<uint8_t>(std::min(2, static_cast<int>(reader->numChannels)));
+    
+    // OPTIMALIZACE: JednorÃ¡zovÃ¡ alokace pro celÃ½ vÃ½slednÃ½ buffer
+    size_t totalSamples = static_cast<size_t>(analysis.targetLengthSamples) * result.numChannels;
+    result.audioData = std::make_unique<float[]>(totalSamples);
+    
+    if (analysis.needsResampling) {
+        // Resampling path s optimalizovanÃ½m temp bufferem
+        juce::AudioBuffer<float> tempBuffer(static_cast<int>(reader->numChannels), 
+                                           static_cast<int>(analysis.originalLengthSamples));
+        if (!reader->read(tempBuffer.getArrayOfWritePointers(), 
+                         static_cast<int>(reader->numChannels), 
+                         0, 
+                         static_cast<int>(analysis.originalLengthSamples))) {
+            throw std::runtime_error("Error reading audio data for resampling");
+        }
+        
+        // OPTIMALIZACE: PÅ™Ã­mÃ½ resampling bez extra alokacÃ­
+        for (int ch = 0; ch < result.numChannels; ++ch) {
+            int sourceChannel = std::min(ch, static_cast<int>(reader->numChannels) - 1);
+            const float* sourceData = tempBuffer.getReadPointer(sourceChannel);
+            
+            uint32_t outputLength;
+            auto resampledChannel = resampleIfNeeded(
+                sourceData, 
+                analysis.originalLengthSamples, 
+                analysis.originalSampleRate, 
+                outputLength
+            );
+            
+            // KopÃ­rovÃ¡nÃ­ do interleaved bufferu
+            for (uint32_t i = 0; i < outputLength; ++i) {
+                result.audioData[i * result.numChannels + ch] = resampledChannel[i];
+            }
+        }
+    } else {
+        // Direct loading path bez resamplingu
+        juce::AudioBuffer<float> tempBuffer(static_cast<int>(reader->numChannels), 
+                                           static_cast<int>(analysis.originalLengthSamples));
+        if (!reader->read(tempBuffer.getArrayOfWritePointers(), 
+                         static_cast<int>(reader->numChannels), 
+                         0, 
+                         static_cast<int>(analysis.originalLengthSamples))) {
+            throw std::runtime_error("Error reading audio data");
+        }
+        
+        // OPTIMALIZACE: PÅ™Ã­mÃ© kopÃ­rovÃ¡nÃ­ do interleaved bufferu
+        for (uint32_t i = 0; i < analysis.originalLengthSamples; ++i) {
+            for (int ch = 0; ch < result.numChannels; ++ch) {
+                int sourceChannel = std::min(ch, static_cast<int>(reader->numChannels) - 1);
+                result.audioData[i * result.numChannels + ch] = tempBuffer.getSample(sourceChannel, static_cast<int>(i));
+            }
+        }
+    }
+    
+    return result;
+}
+
+/**
+ * @brief Vygeneruje sine wave pro danou notu a dynamic level (pro base SR 44100).
+ */
+LoadedSample SampleLoader::generateSineWave(uint8_t midiNote, uint8_t dynamicLevel) {
+    LoadedSample result;
+    result.midiNote = midiNote;
+    result.dynamicLevel = dynamicLevel;
+    result.isGenerated = true;
+    result.originalSampleRate = 44100.0;  // VÅ¾dy pro base SR
+    result.lengthSamples = static_cast<uint32_t>(result.originalSampleRate * SAMPLE_SECONDS);
+    result.numChannels = 1; // GenerovanÃ© samples jsou mono
+    result.sourcePath = "Generated sine wave";
+    
+    result.audioData = std::make_unique<float[]>(result.lengthSamples);
+    
+    double frequency = getFrequencyForNote(midiNote);
+    float amplitude = getDynamicAmplitude(dynamicLevel);
+    
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    const double phaseInc = twoPi * frequency / result.originalSampleRate;
+    
+    // OPTIMALIZACE: RychlÃ© generovÃ¡nÃ­ bez logging per sample
+    for (uint32_t i = 0; i < result.lengthSamples; ++i) {
+        double phase = phaseInc * static_cast<double>(i);
+        result.audioData[i] = amplitude * static_cast<float>(std::sin(phase));
+    }
+    
+    return result;
+}
+
+/**
+ * @brief UloÅ¾Ã­ vygenerovanÃ½ sample do .wav souboru s optimalizovanÃ½m error handlingem.
+ */
+bool SampleLoader::saveGeneratedSample(const LoadedSample& sample, const juce::File& targetFile) {
+    try {
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::FileOutputStream> outputStream(targetFile.createOutputStream());
+        
+        if (!outputStream) {
+            // RedukovanÃ© error logging - pouze kdyÅ¾ se opakuje
+            static int saveErrorCounter = 0;
+            if (++saveErrorCounter % 10 == 1) {  // Log kaÅ¾dou 10. chybu
+                logger_.log("SampleLoader/saveGeneratedSample", "error",
+                           "Cannot create output stream (error #" + juce::String(saveErrorCounter) + ")");
+            }
+            return false;
+        }
+        
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(
+                outputStream.get(),
+                sample.originalSampleRate,
+                sample.numChannels,   
+                16,                   
+                {},                   
+                0                     
+            )
+        );
+        
+        if (!writer) {
+            logger_.log("SampleLoader/saveGeneratedSample", "error", "Cannot create WAV writer");
+            return false;
+        }
+        
+        outputStream.release(); 
+        
+        // OPTIMALIZACE: Streamlined channel handling
+        if (sample.numChannels == 1) {
+            const float* channelData = sample.audioData.get();
+            writer->writeFromFloatArrays(&channelData, 1, sample.lengthSamples);
+        } else {
+            // RychlÃ© de-interleaving pro stereo
+            auto leftChannel = std::make_unique<float[]>(sample.lengthSamples);
+            auto rightChannel = std::make_unique<float[]>(sample.lengthSamples);
+            
+            for (uint32_t i = 0; i < sample.lengthSamples; ++i) {
+                leftChannel[i] = sample.audioData[i * 2];
+                rightChannel[i] = sample.audioData[i * 2 + 1];
+            }
+            
+            const float* channels[] = { leftChannel.get(), rightChannel.get() };
+            writer->writeFromFloatArrays(channels, 2, sample.lengthSamples);
+        }
+        
+        writer->flush();
+        
+        // RedukovanÃ© success logging
+        static int saveSuccessCounter = 0;
+        if (++saveSuccessCounter % 100 == 0) {
+            logger_.log("SampleLoader/saveGeneratedSample", "debug",
+                       "Batch: saved " + juce::String(saveSuccessCounter) + " generated files");
+        }
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        logger_.log("SampleLoader/saveGeneratedSample", "error",
+                   "Exception while saving: " + juce::String(e.what()));
+        return false;
+    } catch (...) {
+        logger_.log("SampleLoader/saveGeneratedSample", "error", "Unknown exception while saving");
+        return false;
+    }
+}
+
+/**
+ * @brief Analyzuje WAV soubor bez naÄtenÃ­ dat (pro memory planning).
+ */
+FileAnalysis SampleLoader::analyzeWavFile(const juce::File& file) {
+    FileAnalysis analysis;
+    
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+    if (!reader) {
+        analysis.errorMessage = "Cannot create reader";
+        return analysis;
+    }
+    
+    analysis.originalLengthSamples = static_cast<uint32_t>(reader->lengthInSamples);
+    analysis.originalSampleRate = reader->sampleRate;
+    analysis.needsResampling = (std::abs(analysis.originalSampleRate - sampleRate_) > 1.0);
+    
+    if (analysis.needsResampling) {
+        analysis.targetLengthSamples = static_cast<uint32_t>(
+            analysis.originalLengthSamples * (sampleRate_ / analysis.originalSampleRate)
+        );
+    } else {
+        analysis.targetLengthSamples = analysis.originalLengthSamples;
+    }
+    
+    int channels = std::min(2, static_cast<int>(reader->numChannels));
+    analysis.memoryRequired = analysis.targetLengthSamples * channels * sizeof(float);
+    analysis.isValid = validateFileAnalysis(analysis);
+    
+    return analysis;
+}
+
+/**
+ * @brief Validuje vÃ½sledky file analÃ½zy.
+ */
+bool SampleLoader::validateFileAnalysis(const FileAnalysis& analysis) {
+    if (analysis.originalLengthSamples == 0) {
+        return false;
+    }
+    
+    if (analysis.originalSampleRate <= 0.0 || analysis.originalSampleRate > 192000.0) {
+        return false;
+    }
+    
+    if (analysis.memoryRequired > 1024 * 1024 * 1024) { // Max 1GB per sample
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Provede resampling pokud je potÅ™eba s optimalizovanou interpolacÃ­.
+ */
+std::unique_ptr<float[]> SampleLoader::resampleIfNeeded(
+    const float* sourceData, 
+    uint32_t sourceLength, 
+    double sourceSampleRate,
+    uint32_t& outputLength
+) {
+    double ratio = sampleRate_ / sourceSampleRate;
+    outputLength = static_cast<uint32_t>(sourceLength * ratio);
+    
+    auto outputData = std::make_unique<float[]>(outputLength);
+    
+    // OPTIMALIZACE: RychlÃ¡ lineÃ¡rnÃ­ interpolace
+    for (uint32_t i = 0; i < outputLength; ++i) {
+        double sourceIndex = static_cast<double>(i) / ratio;
+        uint32_t index1 = static_cast<uint32_t>(sourceIndex);
+        uint32_t index2 = std::min(index1 + 1, sourceLength - 1);
+        
+        double fraction = sourceIndex - static_cast<double>(index1);
+        outputData[i] = static_cast<float>(
+            sourceData[index1] * (1.0 - fraction) + sourceData[index2] * fraction
+        );
+    }
+    
+    return outputData;
+}
+
+/**
+ * @brief VrÃ¡tÃ­ default instrument directory.
+ */
+juce::File SampleLoader::getDefaultInstrumentDirectory() {
+    juce::File appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
+    juce::File ithacaDir = appDataDir.getChildFile("IthacaPlayer");
+    juce::File instrumentDir = ithacaDir.getChildFile("instrument");
+    
+    return instrumentDir;
+}
+
+/**
+ * @brief Vygeneruje nÃ¡zev souboru podle naming convention.
+ */
+juce::String SampleLoader::generateFilename(uint8_t midiNote, uint8_t dynamicLevel, double sr) {
+    juce::String srSuffix = (std::abs(sr - 44100.0) < 1.0) ? "44" : "48";
+    juce::String filename = "m" + juce::String(midiNote).paddedLeft('0', 3) + 
+                           "-vel" + juce::String(dynamicLevel) + 
+                           "-" + srSuffix + ".wav";
+    return filename;
+}
+
+/**
+ * @brief Parsuje nÃ¡zev souboru a extrahuje parametry.
+ */
+bool SampleLoader::parseFilename(const juce::String& filename, uint8_t& midiNote, uint8_t& dynamicLevel, double& sr) {
+    if (!filename.startsWith("m") || !filename.endsWith(".wav")) {
+        return false;
+    }
+    
+    juce::StringArray parts = juce::StringArray::fromTokens(filename.upToLastOccurrenceOf(".wav", false, false), "-", "");
+    if (parts.size() != 3) {
+        return false;
+    }
+    
+    juce::String noteStr = parts[0].substring(1);
+    juce::String levelStr = parts[1].substring(3);
+    juce::String srStr = parts[2];
+    
+    int note = noteStr.getIntValue();
+    int level = levelStr.getIntValue();
+    sr = (srStr == "44") ? 44100.0 : (srStr == "48" ? 48000.0 : 0.0);
+    
+    if (note < MIN_NOTE || note > MAX_NOTE || level < 0 || level >= NUM_DYNAMIC_LEVELS || sr == 0.0) {
+        return false;
+    }
+    
+    midiNote = static_cast<uint8_t>(note);
+    dynamicLevel = static_cast<uint8_t>(level);
+    
+    return true;
+}
+
+/**
+ * @brief Mapuje velocity na dynamic level.
+ */
+uint8_t SampleLoader::velocityToDynamicLevel(uint8_t velocity) {
+    if (velocity == 0) return 0;
+    return std::min(static_cast<uint8_t>(7), static_cast<uint8_t>((velocity - 1) / 16));
+}
+
+/**
+ * @brief VrÃ¡tÃ­ amplitude pro dynamic level.
+ */
+float SampleLoader::getDynamicAmplitude(uint8_t dynamicLevel) {
+    if (dynamicLevel >= NUM_DYNAMIC_LEVELS) {
+        return DYNAMIC_AMPLITUDES[NUM_DYNAMIC_LEVELS - 1];
+    }
+    return DYNAMIC_AMPLITUDES[dynamicLevel];
+}
+
+/**
+ * @brief VrÃ¡tÃ­ frekvenci pro MIDI notu.
+ */
+double SampleLoader::getFrequencyForNote(uint8_t midiNote) const {
+    return 440.0 * std::pow(2.0, (static_cast<int>(midiNote) - 69) / 12.0);
+}
+
+
+===== File: SampleLoader.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\SampleLoader.h
+=====
+#pragma once
+
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_core/juce_core.h>
+#include <memory>
+#include <functional>
+#include <vector>
+#include "Logger.h"
+
+/**
+ * @struct LoadedSample
+ * @brief Kontejner pro jeden naÄtenÃ½ nebo vygenerovanÃ½ sample s metadata.
+ * Obsahuje audio data, metadata o notÄ›, dynamic levelu a sample rate.
+ */
+struct LoadedSample {
+    std::unique_ptr<float[]> audioData;    // Audio data (interleaved pro stereo)
+    uint32_t lengthSamples;                // DÃ©lka v samples (per channel)
+    uint8_t midiNote;                      // MIDI nota (21-108)
+    uint8_t dynamicLevel;                  // Dynamic level (0-7)
+    uint8_t numChannels;                   // PoÄet kanÃ¡lÅ¯ (1=mono, 2=stereo)
+    bool isGenerated;                      // true = vygenerovanÃ½ sine, false = naÄtenÃ½ z WAV
+    juce::String sourcePath;               // Cesta k source souboru
+    double originalSampleRate;             // PÅ¯vodnÃ­ sample rate (pro debug)
+    
+    /**
+     * @brief VÃ½chozÃ­ konstruktor.
+     */
+    LoadedSample() : lengthSamples(0), midiNote(0), dynamicLevel(0), numChannels(1),
+                     isGenerated(false), originalSampleRate(0.0) {}
+    
+    /**
+     * @brief Move konstruktor pro pÅ™esun vlastnictvÃ­.
+     * @param other ZdrojovÃ½ objekt pro pÅ™esun.
+     */
+    LoadedSample(LoadedSample&& other) noexcept
+        : audioData(std::move(other.audioData)),
+          lengthSamples(other.lengthSamples),
+          midiNote(other.midiNote),
+          dynamicLevel(other.dynamicLevel),
+          numChannels(other.numChannels),
+          isGenerated(other.isGenerated),
+          sourcePath(std::move(other.sourcePath)),
+          originalSampleRate(other.originalSampleRate) {
+        // Reset zdroje po pÅ™esunu
+        other.lengthSamples = 0;
+        other.midiNote = 0;
+        other.dynamicLevel = 0;
+        other.numChannels = 1;
+        other.isGenerated = false;
+        other.originalSampleRate = 0.0;
+    }
+    
+    /**
+     * @brief Move assignment operator pro pÅ™esun vlastnictvÃ­.
+     * @param other ZdrojovÃ½ objekt pro pÅ™esun.
+     * @return Reference na tento objekt.
+     */
+    LoadedSample& operator=(LoadedSample&& other) noexcept {
+        if (this != &other) {
+            audioData = std::move(other.audioData);
+            lengthSamples = other.lengthSamples;
+            midiNote = other.midiNote;
+            dynamicLevel = other.dynamicLevel;
+            numChannels = other.numChannels;
+            isGenerated = other.isGenerated;
+            sourcePath = std::move(other.sourcePath);
+            originalSampleRate = other.originalSampleRate;
+            
+            // Reset zdroje
+            other.lengthSamples = 0;
+            other.midiNote = 0;
+            other.dynamicLevel = 0;
+            other.numChannels = 1;
+            other.isGenerated = false;
+            other.originalSampleRate = 0.0;
+        }
+        return *this;
+    }
+    
+    // KopÃ­rovacÃ­ konstruktor a assignment zÅ¯stÃ¡vajÃ­ smazanÃ© (implicitnÄ› kvÅ¯li unique_ptr)
+    LoadedSample(const LoadedSample&) = delete;
+    LoadedSample& operator=(const LoadedSample&) = delete;
+    
+    /**
+     * @brief VrÃ¡tÃ­ celkovou velikost dat v bytes.
+     * @return Velikost v bytes.
+     */
+    size_t getDataSize() const {
+        return lengthSamples * numChannels * sizeof(float);
+    }
+    
+    /**
+     * @brief Zkontroluje zda je sample stereo.
+     * @return True pokud stereo.
+     */
+    bool isStereo() const {
+        return numChannels == 2;
+    }
+};
+
+/**
+ * @struct FileAnalysis
+ * @brief AnalÃ½za WAV souboru pÅ™ed naÄtenÃ­m (pro optimalizaci pamÄ›ti).
+ */
+struct FileAnalysis {
+    uint32_t originalLengthSamples;
+    uint32_t targetLengthSamples;
+    double originalSampleRate;
+    bool needsResampling;
+    size_t memoryRequired;
+    bool isValid;
+    juce::String errorMessage;
+    
+    FileAnalysis() : originalLengthSamples(0), targetLengthSamples(0), 
+                     originalSampleRate(0.0), needsResampling(false), 
+                     memoryRequired(0), isValid(false) {}
+};
+
+/**
+ * @struct LoadingStats
+ * @brief Statistiky loading procesu.
+ */
+struct LoadingStats {
+    int totalExpected;          // OÄekÃ¡vanÃ½ poÄet souborÅ¯ (88 not Ã— 8 levelÅ¯)
+    int filesLoaded;            // PoÄet naÄtenÃ½ch WAV souborÅ¯
+    int filesGenerated;         // PoÄet vygenerovanÃ½ch sine waves
+    int filesSaved;             // PoÄet uloÅ¾enÃ½ch generovanÃ½ch souborÅ¯
+    size_t totalMemoryUsed;     // CelkovÃ¡ spotÅ™eba pamÄ›ti
+    double loadingTimeSeconds;  // CelkovÃ½ Äas loading
+    
+    LoadingStats() : totalExpected(0), filesLoaded(0), filesGenerated(0), 
+                     filesSaved(0), totalMemoryUsed(0), loadingTimeSeconds(0.0) {}
+};
+
+/**
+ * @class SampleLoader
+ * @brief SprÃ¡vce naÄÃ­tÃ¡nÃ­/uklÃ¡dÃ¡nÃ­ audio samples s support pro dynamic levels a sample rate verze.
+ * 
+ * Implementuje hybridnÃ­ systÃ©m:
+ * 1. PokusÃ­ se naÄÃ­st WAV soubor z %APPDATA%/IthacaPlayer/instrument/ s SR v nÃ¡zvu (napÅ™. m060-vel3-44.wav).
+ * 2. Pokud neexistuje pro target SR, naÄte z base SR (44100), resampluje a uloÅ¾Ã­ pro target.
+ * 3. Pokud nic neexistuje, vygeneruje sine pro base SR, uloÅ¾Ã­, resampluje pro 48000 a uloÅ¾Ã­.
+ * 4. Podporuje 8 dynamic levels (vel0-vel7) pro kaÅ¾dou MIDI notu.
+ * 5. AutomatickÃ© resampling na target sample rate.
+ * 6. ZachovÃ¡nÃ­ stereo formÃ¡tu pokud existuje.
+ */
+class SampleLoader
+{
+public:
+    using ProgressCallback = std::function<void(int current, int total, const juce::String& status)>;
+    
+    /**
+     * @brief Konstruktor s target sample rate.
+     * @param sampleRate CÃ­lovÃ½ sample rate pro vÅ¡echny samples.
+     */
+    explicit SampleLoader(double sampleRate);
+    
+    /**
+     * @brief NaÄte kompletnÃ­ instrument (vÅ¡echny noty Ã— vÅ¡echny dynamic levels).
+     * @param instrumentDirectory Directory s .wav soubory.
+     * @param progressCallback Callback pro progress reporting.
+     * @return Vektor naÄtenÃ½ch samples.
+     */
+    std::vector<LoadedSample> loadInstrument(
+        const juce::File& instrumentDirectory,
+        ProgressCallback progressCallback = nullptr
+    );
+    
+    /**
+     * @brief NaÄte jeden konkrÃ©tnÃ­ sample (buÄ z souboru nebo vygeneruje).
+     * @param instrumentDirectory Directory s .wav soubory.
+     * @param midiNote MIDI nota (21-108).
+     * @param dynamicLevel Dynamic level (0-7).
+     * @return NaÄtenÃ½ sample.
+     */
+    LoadedSample loadSingleSample(
+        const juce::File& instrumentDirectory,
+        uint8_t midiNote, 
+        uint8_t dynamicLevel
+    );
+    
+    // === Utility Methods ===
+    
+    /**
+     * @brief VrÃ¡tÃ­ default instrument directory (%APPDATA%/IthacaPlayer/instrument/).
+     * @return DefaultnÃ­ directory.
+     */
+    static juce::File getDefaultInstrumentDirectory();
+    
+    /**
+     * @brief Vygeneruje nÃ¡zev souboru podle naming convention vÄetnÄ› SR.
+     * @param midiNote MIDI nota.
+     * @param dynamicLevel Dynamic level.
+     * @param sr Sample rate (44100 nebo 48000).
+     * @return NÃ¡zev souboru (napÅ™. "m060-vel3-44.wav").
+     */
+    static juce::String generateFilename(uint8_t midiNote, uint8_t dynamicLevel, double sr);
+    
+    /**
+     * @brief Parsuje nÃ¡zev souboru a extrahuje MIDI notu, dynamic level a SR.
+     * @param filename NÃ¡zev souboru.
+     * @param midiNote [out] ExtrahovanÃ¡ MIDI nota.
+     * @param dynamicLevel [out] ExtrahovanÃ½ dynamic level.
+     * @param sr [out] ExtrahovanÃ½ sample rate.
+     * @return true pokud parsing ÃºspÄ›Å¡nÃ½.
+     */
+    static bool parseFilename(const juce::String& filename, uint8_t& midiNote, uint8_t& dynamicLevel, double& sr);
+    
+    /**
+     * @brief Mapuje velocity (0-127) na dynamic level (0-7).
+     * @param velocity MIDI velocity.
+     * @return Dynamic level.
+     */
+    static uint8_t velocityToDynamicLevel(uint8_t velocity);
+    
+    /**
+     * @brief VrÃ¡tÃ­ amplitude pro danÃ½ dynamic level.
+     * @param dynamicLevel Dynamic level (0-7).
+     * @return Amplitude (0.05f - 1.0f).
+     */
+    static float getDynamicAmplitude(uint8_t dynamicLevel);
+    
+    /**
+     * @brief VrÃ¡tÃ­ loading statistiky.
+     * @return Reference na statistiky.
+     */
+    const LoadingStats& getLoadingStats() const { return loadingStats_; }
+
+private:
+    double sampleRate_;                           // Target sample rate
+    juce::AudioFormatManager formatManager_;     // JUCE audio format manager
+    Logger& logger_;                             // Reference na logger
+    LoadingStats loadingStats_;                  // Loading statistiky
+    
+    // === Private Methods ===
+    
+    /**
+     * @brief Analyzuje WAV soubor bez naÄtenÃ­ dat (pro memory planning).
+     * @param file Soubor k analÃ½ze.
+     * @return AnalÃ½za souboru.
+     */
+    FileAnalysis analyzeWavFile(const juce::File& file);
+    
+    /**
+     * @brief Validuje vÃ½sledky file analÃ½zy.
+     * @param analysis AnalÃ½za k validaci.
+     * @return True pokud validnÃ­.
+     */
+    bool validateFileAnalysis(const FileAnalysis& analysis);
+    
+    /**
+     * @brief NaÄte WAV soubor s optional resampling.
+     * @param file Soubor k naÄtenÃ­.
+     * @param midiNote MIDI nota.
+     * @param dynamicLevel Dynamic level.
+     * @return NaÄtenÃ½ sample.
+     */
+    LoadedSample loadWavFile(const juce::File& file, uint8_t midiNote, uint8_t dynamicLevel);
+    
+    /**
+     * @brief Vygeneruje sine wave pro danou notu a dynamic level (pro base SR 44100).
+     * @param midiNote MIDI nota.
+     * @param dynamicLevel Dynamic level.
+     * @return VygenerovanÃ½ sample.
+     */
+    LoadedSample generateSineWave(uint8_t midiNote, uint8_t dynamicLevel);
+    
+    /**
+     * @brief UloÅ¾Ã­ vygenerovanÃ½ sample do .wav souboru.
+     * @param sample Sample k uloÅ¾enÃ­.
+     * @param targetFile CÃ­lovÃ½ soubor.
+     * @return True pokud ÃºspÄ›Å¡nÃ©.
+     */
+    bool saveGeneratedSample(const LoadedSample& sample, const juce::File& targetFile);
+    
+    /**
+     * @brief Provede resampling pokud je potÅ™eba.
+     * @param sourceData ZdrojovÃ¡ data.
+     * @param sourceLength DÃ©lka zdroje.
+     * @param sourceSampleRate ZdrojovÃ½ SR.
+     * @param outputLength [out] DÃ©lka vÃ½stupu.
+     * @return ResamplovanÃ¡ data.
+     */
+    std::unique_ptr<float[]> resampleIfNeeded(
+        const float* sourceData, 
+        uint32_t sourceLength, 
+        double sourceSampleRate,
+        uint32_t& outputLength
+    );
+    
+    /**
+     * @brief VrÃ¡tÃ­ frekvenci pro MIDI notu.
+     * @param midiNote MIDI nota.
+     * @return Frekvence v Hz.
+     */
+    double getFrequencyForNote(uint8_t midiNote) const;
+    
+    // === Constants ===
+    
+    static constexpr uint8_t MIN_NOTE = 21;        // A0
+    static constexpr uint8_t MAX_NOTE = 108;       // C8
+    static constexpr uint8_t NUM_DYNAMIC_LEVELS = 8;
+    static constexpr double SAMPLE_SECONDS = 12.0; // DÃ©lka generovanÃ½ch samples
+    
+    // Dynamic amplitudes pro jednotlivÃ© ÃºrovnÄ›
+    static const float DYNAMIC_AMPLITUDES[8];
+};
+
+
+===== File: VoiceManager.cpp =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\VoiceManager.cpp
+=====
+#include "VoiceManager.h"
+#include "Logger.h"
+
+// ======================== SynthVoice Implementation =========================
+
+/**
+ * @brief Konstruktor SynthVoice
+ * Inicializuje vÅ¡echny member variables na bezpeÄnÃ© vÃ½chozÃ­ hodnoty.
+ */
+SynthVoice::SynthVoice()
+    : logger_(Logger::getInstance())
+{
+    reset();
+}
+
+/**
+ * @brief SpustÃ­ voice s automatickÃ½m vÃ½bÄ›rem dynamic levelu
+ * PÅ™echod state: Inactive/Release â†’ Playing
+ * @param midiNote MIDI nota (21-108)
+ * @param velocity MIDI velocity (1-127)
+ * @param library Reference na SampleLibrary pro pÅ™Ã­stup k audio datÅ¯m
+ */
+void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library)
+{
+    // Reset pÅ™edchozÃ­ho stavu (dÅ¯leÅ¾itÃ© pÅ™i restart stejnÃ© noty)
+    reset();
+
+    midiNote_ = midiNote;
+    velocity_ = velocity;
+    voiceState_ = VoiceState::Playing;  // PÅ™echod do Playing state
+
+    // MapovÃ¡nÃ­ velocity na dynamic level (0-7)
+    uint8_t preferredLevel = library.velocityToDynamicLevel(velocity);
+    
+    // Najdeme nejlepÅ¡Ã­ dostupnÃ½ level (s fallback logikou)
+    uint8_t bestLevel = findBestAvailableLevel(library, midiNote, preferredLevel);
+    
+    if (bestLevel == 255) {
+        logger_.log("SynthVoice/start", "error", 
+                   "No available dynamic level for note " + juce::String((int)midiNote));
+        voiceState_ = VoiceState::Inactive;
+        return;
+    }
+
+    // NaÄtenÃ­ sample dat z knihovny
+    currentDynamicLevel_ = bestLevel;
+    sampleData_ = library.getSampleData(midiNote, currentDynamicLevel_);
+    currentSampleLength_ = library.getSampleLength(midiNote, currentDynamicLevel_);
+    
+    // ZjiÅ¡tÄ›nÃ­ stereo/mono formÃ¡tu
+    currentSampleIsStereo_ = library.isSampleStereo(midiNote, currentDynamicLevel_);
+
+    // Validace naÄtenÃ½ch dat
+    if (!sampleData_ || currentSampleLength_ == 0) {
+        logger_.log("SynthVoice/start", "error", 
+                   "Invalid sample data for note " + juce::String((int)midiNote) + 
+                   " level " + juce::String((int)currentDynamicLevel_));
+        voiceState_ = VoiceState::Inactive;
+        return;
+    }
+
+    // Inicializace playback stavu
+    position_ = 0;
+    releaseCounter_ = 0;  // Reset release counter
+
+    logger_.log("SynthVoice/start", "debug", 
+               "Voice started: note=" + juce::String((int)midiNote) + 
+               " vel=" + juce::String((int)velocity) +
+               " level=" + juce::String((int)currentDynamicLevel_) +
+               " length=" + juce::String(currentSampleLength_) +
+               " stereo=" + juce::String(currentSampleIsStereo_ ? "yes" : "no"));
+}
+
+/**
+ * @brief SpustÃ­ release fÃ¡zi s ÄasovÃ½m counterem (minimalistickÃ¡ varianta)
+ * PÅ™echod state: Playing â†’ Release
+ * Voice bude automaticky ukonÄena po RELEASE_DURATION_SAMPLES bez fade-out
+ */
+void SynthVoice::startRelease()
+{
+    if (voiceState_ == VoiceState::Playing) {
+        voiceState_ = VoiceState::Release;
+        releaseCounter_ = 0;  // Reset release counter na zaÄÃ¡tek
+        
+        // VÃ½poÄet release doby pro informaci
+        double releaseTimeMs = (static_cast<double>(RELEASE_DURATION_SAMPLES) / ASSUMED_SAMPLE_RATE) * 1000.0;
+        
+        logger_.log("SynthVoice/startRelease", "debug", 
+                   "Voice entering release phase: note=" + juce::String((int)midiNote_) +
+                   " duration=" + juce::String(RELEASE_DURATION_SAMPLES) + " samples" +
+                   " (" + juce::String(releaseTimeMs, 1) + "ms)");
+    }
+}
+
+/**
+ * @brief OkamÅ¾itÄ› zastavÃ­ voice
+ * PÅ™echod state: Playing/Release â†’ Inactive
+ */
+void SynthVoice::stop()
+{
+    voiceState_ = VoiceState::Inactive;
+    logger_.log("SynthVoice/stop", "debug", 
+               "Voice stopped immediately: note=" + juce::String((int)midiNote_));
+}
+
+/**
+ * @brief Resetuje voice do vÃ½chozÃ­ho stavu
+ * PÅ™echod state: Any â†’ Inactive
+ */
+void SynthVoice::reset()
+{
+    voiceState_ = VoiceState::Inactive;
+    midiNote_ = 0;
+    velocity_ = 0;
+    currentDynamicLevel_ = 0;
+    sampleData_ = nullptr;
+    currentSampleLength_ = 0;
+    position_ = 0;
+    queue_ = 0;
+    currentSampleIsStereo_ = false;
+    releaseCounter_ = 0;  // Reset release counter
+}
+
+/**
+ * @brief Renderuje audio s release counter management
+ * Automaticky poÄÃ­tÃ¡ release counter a ukonÄuje voice po vyprÅ¡enÃ­.
+ * MinimalistickÃ¡ varianta: Å¾Ã¡dnÃ½ fade-out, jen ÄasovÃ½ limit.
+ * @param outputBuffer Ukazatel na output buffer (mono nebo interleaved stereo)
+ * @param numSamples PoÄet samples k renderovÃ¡nÃ­ (per channel)
+ * @param isStereo True pokud output buffer je stereo interleaved
+ */
+void SynthVoice::render(float* outputBuffer, int numSamples, bool isStereo)
+{
+    // Renderuj pouze pokud voice je aktivnÃ­ (Playing nebo Release)
+    if (!isActive() || sampleData_ == nullptr || currentSampleLength_ == 0 || !outputBuffer)
+        return;
+
+    // HlavnÃ­ rendering loop s release counter management
+    for (int i = 0; i < numSamples; ++i) {
+        // === KONTROLA UKONÄŒENÃ ===
+        bool shouldStop = false;
+        juce::String stopReason;
+        
+        // Kontrola konce sample (platÃ­ pro Playing i Release)
+        if (position_ >= currentSampleLength_) {
+            shouldStop = true;
+            stopReason = "end of sample";
+        }
+        
+        // === RELEASE COUNTER MANAGEMENT ===
+        if (voiceState_ == VoiceState::Release) {
+            releaseCounter_++;
+            
+            // Kontrola vyprÅ¡enÃ­ release Äasu
+            if (releaseCounter_ >= RELEASE_DURATION_SAMPLES) {
+                shouldStop = true;
+                stopReason = "release timer expired";
+            }
+        }
+        
+        // UkonÄenÃ­ voice pokud je potÅ™eba
+        if (shouldStop) {
+            voiceState_ = VoiceState::Inactive;
+            logger_.log("SynthVoice/render", "debug", 
+                       "Voice auto-stopped: note=" + juce::String((int)midiNote_) + 
+                       " reason=" + stopReason + 
+                       " position=" + juce::String(position_) + "/" + juce::String(currentSampleLength_) +
+                       " release_counter=" + juce::String(releaseCounter_));
+            break;
+        }
+        
+        // === AUDIO RENDERING (bez fade-out - minimalistickÃ¡ varianta) ===
+        // PoznÃ¡mka: V budoucnu zde bude aplikace ADSR envelope gain
+        
+        if (isStereo) {
+            // === STEREO OUTPUT ===
+            if (currentSampleIsStereo_) {
+                // Stereo sample â†’ stereo output (pÅ™Ã­mÃ© kopÃ­rovÃ¡nÃ­)
+                outputBuffer[i * 2] += sampleData_[position_ * 2];         // Left channel
+                outputBuffer[i * 2 + 1] += sampleData_[position_ * 2 + 1]; // Right channel
+            } else {
+                // Mono sample â†’ stereo output (duplikace na oba kanÃ¡ly)
+                float sample = sampleData_[position_];
+                outputBuffer[i * 2] += sample;     // Left channel
+                outputBuffer[i * 2 + 1] += sample; // Right channel
+            }
+        } else {
+            // === MONO OUTPUT ===
+            if (currentSampleIsStereo_) {
+                // Stereo sample â†’ mono output (mix L+R s -3dB kompenzacÃ­)
+                float left = sampleData_[position_ * 2];
+                float right = sampleData_[position_ * 2 + 1];
+                outputBuffer[i] += (left + right) * 0.5f;
+            } else {
+                // Mono sample â†’ mono output (pÅ™Ã­mÃ© kopÃ­rovÃ¡nÃ­)
+                outputBuffer[i] += sampleData_[position_];
+            }
+        }
+        
+        ++position_;
+    }
+}
+
+/**
+ * @brief Najde nejlepÅ¡Ã­ dostupnÃ½ dynamic level s fallback logikou
+ * Implementuje spiral search pattern - hledÃ¡ nejblÃ­Å¾e preferovanÃ©mu levelu.
+ * @param library Reference na SampleLibrary
+ * @param midiNote MIDI nota k vyhledÃ¡nÃ­
+ * @param preferredLevel PreferovanÃ½ dynamic level (z velocity mapping)
+ * @return NejlepÅ¡Ã­ dostupnÃ½ level nebo 255 pokud Å¾Ã¡dnÃ½ nenÃ­ dostupnÃ½
+ */
+uint8_t SynthVoice::findBestAvailableLevel(const SampleLibrary& library, uint8_t midiNote, uint8_t preferredLevel)
+{
+    // 1. Zkus preferovanÃ½ level
+    if (library.isNoteAvailable(midiNote, preferredLevel)) {
+        return preferredLevel;
+    }
+
+    // 2. Spiral search - hledej nejbliÅ¾Å¡Ã­ dostupnÃ½ level
+    for (int offset = 1; offset < 8; ++offset) {
+        // Zkus niÅ¾Å¡Ã­ level (mÄ›kÄÃ­ dynamika)
+        if (preferredLevel >= offset) {
+            uint8_t lowerLevel = static_cast<uint8_t>(preferredLevel - offset);
+            if (library.isNoteAvailable(midiNote, lowerLevel)) {
+                logger_.log("SynthVoice/findBestAvailableLevel", "debug",
+                           "Fallback to lower level " + juce::String((int)lowerLevel) + 
+                           " instead of " + juce::String((int)preferredLevel));
+                return lowerLevel;
+            }
+        }
+        
+        // Zkus vyÅ¡Å¡Ã­ level (tvrdÅ¡Ã­ dynamika)
+        uint8_t higherLevel = static_cast<uint8_t>(preferredLevel + offset);
+        if (higherLevel < 8 && library.isNoteAvailable(midiNote, higherLevel)) {
+            logger_.log("SynthVoice/findBestAvailableLevel", "debug",
+                       "Fallback to higher level " + juce::String((int)higherLevel) + 
+                       " instead of " + juce::String((int)preferredLevel));
+            return higherLevel;
+        }
+    }
+
+    // 3. Å½Ã¡dnÃ½ level nenÃ­ dostupnÃ½
+    logger_.log("SynthVoice/findBestAvailableLevel", "error",
+               "No dynamic level available for note " + juce::String((int)midiNote));
+    return 255;
+}
+
+// ======================== VoiceManager Implementation =========================
+
+/**
+ * @brief Konstruktor VoiceManager
+ * Inicializuje pool voices a nastavuje vÃ½chozÃ­ statistiky.
+ * @param library Reference na SampleLibrary (musÃ­ bÃ½t platnÃ¡ po celou dobu Å¾ivota VoiceManager)
+ * @param numVoices PoÄet voices v poolu (vÃ½chozÃ­ 16)
+ */
+VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
+    : logger_(Logger::getInstance()), sampleLibrary_(library)
+{
+    // Validace vstupnÃ­ch parametrÅ¯
+    if (numVoices <= 0 || numVoices > 64) {
+        logger_.log("VoiceManager/constructor", "warn", 
+                   "Invalid voice count " + juce::String(numVoices) + ", using 16");
+        numVoices = 16;
+    }
+
+    // Inicializace voice poolu
+    voices_.reserve(numVoices);
+    for (int i = 0; i < numVoices; ++i) {
+        voices_.emplace_back(std::make_unique<SynthVoice>());
+        voices_.back()->setQueue(0);  // VÅ¡echny voices zaÄÃ­najÃ­ s nejniÅ¾Å¡Ã­ prioritou
+    }
+
+    // Reset statistik
+    lastStats_ = VoiceStats();
+    voicesStolenSinceLastRefresh_ = 0;
+    releaseVoicesStolen_ = 0;
+    playingVoicesStolen_ = 0;
+    refreshCounter_ = 0;
+
+    logger_.log("VoiceManager/constructor", "info", 
+               "Minimalist VoiceManager created with " + juce::String(numVoices) + 
+               " voices and release counter system");
+}
+
+/**
+ * @brief Zpracuje MIDI udÃ¡losti z MidiStateManager
+ * HlavnÃ­ vstupnÃ­ bod pro MIDI data - zpracovÃ¡vÃ¡ note-on a note-off udÃ¡losti.
+ * @param midiState Reference na MidiStateManager s MIDI frontami
+ */
+void VoiceManager::processMidiEvents(MidiStateManager& midiState)
+{
+    int totalNotesProcessed = 0;
+
+    // === ZPRACOVÃNÃ NOTE ON UDÃLOSTÃ ===
+    for (int ch = 0; ch < 16; ++ch) {
+        while (true) {
+            uint8_t rawNote = midiState.popNoteOn(static_cast<uint8_t>(ch));
+            if (rawNote == 255) break;  // PrÃ¡zdnÃ¡ fronta
+            
+            uint8_t note = rawNote;
+            uint8_t velocity = midiState.getVelocity(static_cast<uint8_t>(ch), note);
+            
+            // Validace MIDI dat
+            if (velocity == 0) {
+                // Velocity 0 je note-off
+                stopVoice(note);
+            } else {
+                startVoice(note, velocity);
+                totalNotesProcessed++;
+            }
+        }
+    }
+
+    // === ZPRACOVÃNÃ NOTE OFF UDÃLOSTÃ ===
+    for (int ch = 0; ch < 16; ++ch) {
+        while (true) {
+            uint8_t rawNote = midiState.popNoteOff(static_cast<uint8_t>(ch));
+            if (rawNote == 255) break;  // PrÃ¡zdnÃ¡ fronta
+            
+            uint8_t note = rawNote;
+            stopVoice(note);  // SpustÃ­ release counter
+            totalNotesProcessed++;
+        }
+    }
+
+    // LogovÃ¡nÃ­ pouze pÅ™i zpracovÃ¡nÃ­ udÃ¡lostÃ­
+    if (totalNotesProcessed > 0) {
+        logger_.log("VoiceManager/processMidiEvents", "debug", 
+                   "Processed " + juce::String(totalNotesProcessed) + " MIDI events");
+    }
+}
+
+/**
+ * @brief Generuje audio mixem vÅ¡ech aktivnÃ­ch voices
+ * Renderuje Playing i Release voices (obÄ› jsou "aktivnÃ­").
+ * @param buffer Ukazatel na audio buffer (stereo interleaved)
+ * @param numSamples PoÄet samples k vygenerovÃ¡nÃ­ (per channel)
+ */
+void VoiceManager::generateAudio(float* buffer, int numSamples)
+{
+    // ZÃ¡kladnÃ­ validace
+    if (buffer == nullptr || numSamples <= 0) {
+        logger_.log("VoiceManager/generateAudio", "warn", "Invalid buffer or sample count");
+        return;
+    }
+
+    // PÅ™edpoklÃ¡dÃ¡me stereo output (standard pro plugin)
+    bool isStereoOutput = true;
+    int activeVoiceCount = 0;
+    int playingCount = 0;
+    int releaseCount = 0;
+    
+    // Mix vÅ¡ech aktivnÃ­ch voices (Playing + Release)
+    for (auto& voice : voices_) {
+        if (voice->isActive()) {
+            voice->render(buffer, numSamples, isStereoOutput);
+            activeVoiceCount++;
+            
+            if (voice->isPlaying()) {
+                playingCount++;
+            } else if (voice->isInRelease()) {
+                releaseCount++;
+            }
+        }
+    }
+
+    // LogovÃ¡nÃ­ pouze pÅ™i zmÄ›nÄ› stavu
+    static int lastActiveCount = 0;
+    static int lastPlayingCount = 0;
+    static int lastReleaseCount = 0;
+    
+    if (activeVoiceCount != lastActiveCount || 
+        playingCount != lastPlayingCount || 
+        releaseCount != lastReleaseCount) {
+        
+        logger_.log("VoiceManager/generateAudio", "debug", 
+                   "Active voices: " + juce::String(activeVoiceCount) + 
+                   " (playing: " + juce::String(playingCount) + 
+                   ", release: " + juce::String(releaseCount) + ")");
+        
+        lastActiveCount = activeVoiceCount;
+        lastPlayingCount = playingCount;
+        lastReleaseCount = releaseCount;
+    }
+}
+
+/**
+ * @brief Housekeeping a statistiky
+ * PravidelnÄ› volanÃ¡ metoda pro ÃºdrÅ¾bu voice manageru a aktualizaci statistik.
+ */
+void VoiceManager::refresh()
+{
+    ++refreshCounter_;
+    
+    // Reset voice stealing counters pro tento cyklus
+    voicesStolenSinceLastRefresh_ = 0;
+    releaseVoicesStolen_ = 0;
+    playingVoicesStolen_ = 0;
+    
+    // Aktualizace statistik
+    updateStatistics();
+    
+    // PeriodickÃ© logovÃ¡nÃ­ (kaÅ¾dÃ½ch 1000 cyklÅ¯)
+    if (refreshCounter_ % PERIODIC_LOG_INTERVAL == 0) {
+        logPeriodicStatus();
+    }
+}
+
+/**
+ * @brief VOICE ALLOCATION ALGORITMUS s release counter podporou
+ * 
+ * Implementuje intelligent voice management s nÃ¡sledujÃ­cÃ­ prioritou:
+ * 1. NOTE RESTART DETECTION - stejnÃ¡ nota na stejnÃ©m voice
+ * 2. FREE VOICE ALLOCATION - najdi neaktivnÃ­ voice
+ * 3. RELEASE VOICE STEALING - ukradni voice v release fÃ¡zi (preferovanÃ©)
+ * 4. PLAYING VOICE STEALING - ukradni aktivnÄ› hrajÃ­cÃ­ voice (last resort)
+ * 
+ * @param midiNote MIDI nota (0-127)
+ * @param velocity MIDI velocity (1-127)
+ */
+void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
+{
+    logger_.log("VoiceManager/startVoice", "debug", 
+               "=== VOICE ALLOCATION START: note=" + juce::String((int)midiNote) + 
+               " vel=" + juce::String((int)velocity) + " ===");
+
+    // === KROK 1: NOTE RESTART DETECTION ===
+    // StejnÃ¡ nota musÃ­ bÃ½t vÅ¾dy na stejnÃ©m voice (monofonie per nota)
+    // DÅ¯vod: PÅ™irozenÃ© chovÃ¡nÃ­ syntezÃ¡toru + prevent phase issues
+    SynthVoice* existingVoice = findVoicePlayingNote(midiNote);
+    if (existingVoice) {
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "STEP 1: Note restart detected - reusing existing voice");
+        
+        // RESTART existujÃ­cÃ­ voice s novou velocity
+        existingVoice->start(midiNote, velocity, sampleLibrary_);
+        // ZACHOVÃNÃ queue priority - voice zÅ¯stÃ¡vÃ¡ na stejnÃ© pozici
+        
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "SUCCESS: Restarted existing voice for note " + juce::String((int)midiNote) +
+                   " with velocity " + juce::String((int)velocity));
+        return;
+    }
+
+    // === KROK 2: FREE VOICE ALLOCATION ===
+    // HledÃ¡me nejlepÅ¡Ã­ neaktivnÃ­ voice (Inactive state)
+    // Preferujeme voice s nejniÅ¾Å¡Ã­ prioritou (nejdÃ©le nepouÅ¾itÃ¡)
+    SynthVoice* freeVoice = findBestFreeVoice();
+    if (freeVoice) {
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "STEP 2: Free voice found - allocating");
+        
+        freeVoice->start(midiNote, velocity, sampleLibrary_);
+        assignTopPriority(freeVoice);  // NovÃ¡ voice dostÃ¡vÃ¡ top prioritu
+        
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "SUCCESS: Allocated free voice for note " + juce::String((int)midiNote));
+        return;
+    }
+
+    // === KROK 3: RELEASE VOICE STEALING ===
+    // Preferujeme ukradnout voice v release fÃ¡zi (dokonÄuje release counter)
+    // DÅ¯vod: MinimÃ¡lnÃ­ audio impact, pÅ™irozenÃ© chovÃ¡nÃ­
+    SynthVoice* releaseVoice = findBestReleaseCandidate();
+    if (releaseVoice) {
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "STEP 3: Release voice stealing - taking voice in release phase");
+        
+        uint8_t stolenNote = releaseVoice->getNote();
+        uint32_t releaseRemaining = releaseVoice->getReleaseCounterRemaining();
+        
+        releaseVoice->start(midiNote, velocity, sampleLibrary_);
+        assignTopPriority(releaseVoice);
+        
+        // Statistiky
+        voicesStolenSinceLastRefresh_++;
+        releaseVoicesStolen_++;
+        
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "SUCCESS: Stole release voice - note " + juce::String((int)midiNote) + 
+                   " replaced note " + juce::String((int)stolenNote) + 
+                   " (had " + juce::String(releaseRemaining) + " samples remaining)");
+        return;
+    }
+
+    // === KROK 4: PLAYING VOICE STEALING (LAST RESORT) ===
+    // KrajnÃ­ Å™eÅ¡enÃ­ - ukradneme aktivnÄ› hrajÃ­cÃ­ voice
+    // Preferujeme nejstarÅ¡Ã­ + nejvÃ­ce dokonÄenÃ½ (minimÃ¡lnÃ­ audio disruption)
+    SynthVoice* playingVoice = findBestPlayingCandidate();
+    if (playingVoice) {
+        logger_.log("VoiceManager/startVoice", "warn", 
+                   "STEP 4: Playing voice stealing - last resort activated");
+        
+        uint8_t stolenNote = playingVoice->getNote();
+        float stolenProgress = playingVoice->getProgress();
+        
+        playingVoice->start(midiNote, velocity, sampleLibrary_);
+        assignTopPriority(playingVoice);
+        
+        // Statistiky
+        voicesStolenSinceLastRefresh_++;
+        playingVoicesStolen_++;
+        
+        logger_.log("VoiceManager/startVoice", "warn", 
+                   "SUCCESS: Stole playing voice - note " + juce::String((int)midiNote) + 
+                   " replaced note " + juce::String((int)stolenNote) + 
+                   " (was " + juce::String(stolenProgress * 100.0f, 1) + "% complete)");
+        return;
+    }
+
+    // === KROK 5: ALLOCATION FAILURE ===
+    // NemÄ›lo by se nikdy stÃ¡t, ale pro robustnost
+    logger_.log("VoiceManager/startVoice", "error", 
+               "FAILURE: Cannot allocate voice for note " + juce::String((int)midiNote) + 
+               " - all allocation strategies failed!");
+}
+
+/**
+ * @brief SpustÃ­ release counter pro danou notu
+ * PÅ™echod: Playing â†’ Release (spustÃ­ release counter)
+ * @param midiNote MIDI nota k release
+ */
+void VoiceManager::stopVoice(uint8_t midiNote)
+{
+    // Najdi voice hrajÃ­cÃ­ tuto notu (pouze Playing state)
+    for (auto& voice : voices_) {
+        if (voice->isPlaying() && voice->getNote() == midiNote) {
+            // SpustÃ­ release counter mÃ­sto immediate stop
+            voice->startRelease();
+            // Queue priorita se NEMÄšNÃ - voice pokraÄuje na stejnÃ© pozici
+            
+            logger_.log("VoiceManager/stopVoice", "debug", 
+                       "Started release counter for note " + juce::String((int)midiNote));
+            return;
+        }
+    }
+    
+    // Nota nebyla nalezena - mÅ¯Å¾e bÃ½t normÃ¡lnÃ­ pÅ™i rychlÃ©m MIDI trafficu
+    logger_.log("VoiceManager/stopVoice", "debug", 
+               "Note " + juce::String((int)midiNote) + " not found for release (already stopped?)");
+}
+
+// === VOICE ALLOCATION HELPER METHODS ===
+
+/**
+ * @brief Najde voice jiÅ¾ hrajÃ­cÃ­ specifickou notu
+ * PouÅ¾Ã­vÃ¡ se pro note restart detection (KROK 1)
+ * @param midiNote Nota k vyhledÃ¡nÃ­
+ * @return Voice hrajÃ­cÃ­ tuto notu nebo nullptr
+ */
+SynthVoice* VoiceManager::findVoicePlayingNote(uint8_t midiNote)
+{
+    for (auto& voice : voices_) {
+        // HledÃ¡me v Playing i Release state (obÄ› mÅ¯Å¾ou bÃ½t "restarted")
+        if (voice->isActive() && voice->getNote() == midiNote) {
+            return voice.get();
+        }
+    }
+    return nullptr;
+}
+
+/**
+ * @brief Najde nejlepÅ¡Ã­ neaktivnÃ­ voice
+ * PouÅ¾Ã­vÃ¡ se pro free voice allocation (KROK 2)
+ * Preferuje voice s nejniÅ¾Å¡Ã­ prioritou (nejdÃ©le nepouÅ¾itÃ¡)
+ * @return NejlepÅ¡Ã­ free voice nebo nullptr
+ */
+SynthVoice* VoiceManager::findBestFreeVoice()
+{
+    SynthVoice* bestCandidate = nullptr;
+    uint8_t lowestQueue = 255;  // HledÃ¡me nejniÅ¾Å¡Ã­ prioritu (nejdÃ©le nepouÅ¾itÃ¡)
+    
+    for (auto& voice : voices_) {
+        if (voice->isInactive()) {
+            uint8_t currentQueue = voice->getQueue();
+            if (currentQueue <= lowestQueue) {
+                bestCandidate = voice.get();
+                lowestQueue = currentQueue;
+            }
+        }
+    }
+    
+    if (bestCandidate) {
+        logger_.log("VoiceManager/findBestFreeVoice", "debug", 
+                   "Found free voice with queue priority " + juce::String((int)lowestQueue));
+    } else {
+        logger_.log("VoiceManager/findBestFreeVoice", "debug", "No free voices available");
+    }
+    
+    return bestCandidate;
+}
+
+/**
+ * @brief Najde nejlepÅ¡Ã­ release voice pro stealing
+ * PouÅ¾Ã­vÃ¡ se pro release voice stealing (KROK 3)
+ * Preferuje nejstarÅ¡Ã­ release voice (nejniÅ¾Å¡Ã­ queue priority)
+ * @return NejlepÅ¡Ã­ release candidate nebo nullptr
+ */
+SynthVoice* VoiceManager::findBestReleaseCandidate()
+{
+    SynthVoice* bestCandidate = nullptr;
+    uint8_t lowestQueue = 255;          // NejstarÅ¡Ã­ = nejniÅ¾Å¡Ã­ queue
+    uint32_t highestCounter = 0;        // NejvÃ­ce pokroÄilÃ½ release counter
+    
+    for (auto& voice : voices_) {
+        if (voice->isInRelease()) {
+            uint8_t currentQueue = voice->getQueue();
+            uint32_t releaseRemaining = voice->getReleaseCounterRemaining();
+            uint32_t releaseElapsed = SynthVoice::RELEASE_DURATION_SAMPLES - releaseRemaining;
+            
+            // Priorita: nejniÅ¾Å¡Ã­ queue (nejstarÅ¡Ã­), pÅ™i shodÄ› nejvyÅ¡Å¡Ã­ release progress
+            if (currentQueue < lowestQueue || 
+                (currentQueue == lowestQueue && releaseElapsed > highestCounter)) {
+                bestCandidate = voice.get();
+                lowestQueue = currentQueue;
+                highestCounter = releaseElapsed;
+            }
+        }
+    }
+    
+    if (bestCandidate) {
+        uint32_t remaining = bestCandidate->getReleaseCounterRemaining();
+        logger_.log("VoiceManager/findBestReleaseCandidate", "debug", 
+                   "Found release voice: queue=" + juce::String((int)lowestQueue) + 
+                   " remaining=" + juce::String(remaining) + " samples");
+    } else {
+        logger_.log("VoiceManager/findBestReleaseCandidate", "debug", "No release voices available");
+    }
+    
+    return bestCandidate;
+}
+
+/**
+ * @brief Najde nejlepÅ¡Ã­ playing voice pro stealing (last resort)
+ * PouÅ¾Ã­vÃ¡ se pro playing voice stealing (KROK 4)
+ * Preferuje nejstarÅ¡Ã­ + nejvyÅ¡Å¡Ã­ progress (minimÃ¡lnÃ­ audio disruption)
+ * @return NejlepÅ¡Ã­ playing candidate nebo nullptr
+ */
+SynthVoice* VoiceManager::findBestPlayingCandidate()
+{
+    SynthVoice* bestCandidate = nullptr;
+    uint8_t lowestQueue = 255;      // NejstarÅ¡Ã­ = nejniÅ¾Å¡Ã­ queue
+    float highestProgress = 0.0f;   // NejvÃ­ce dokonÄenÃ½ = nejmenÅ¡Ã­ disruption
+    
+    for (auto& voice : voices_) {
+        if (voice->isPlaying()) {
+            uint8_t currentQueue = voice->getQueue();
+            float currentProgress = voice->getProgress();
+            
+            // Priorita: nejniÅ¾Å¡Ã­ queue (nejstarÅ¡Ã­), pÅ™i shodÄ› nejvyÅ¡Å¡Ã­ progress
+            if (currentQueue < lowestQueue || 
+                (currentQueue == lowestQueue && currentProgress > highestProgress)) {
+                bestCandidate = voice.get();
+                lowestQueue = currentQueue;
+                highestProgress = currentProgress;
+            }
+        }
+    }
+    
+    if (bestCandidate) {
+        logger_.log("VoiceManager/findBestPlayingCandidate", "warn", 
+                   "Found playing voice for stealing: queue=" + juce::String((int)lowestQueue) + 
+                   " progress=" + juce::String(highestProgress * 100.0f, 1) + "% (DISRUPTIVE!)");
+    } else {
+        logger_.log("VoiceManager/findBestPlayingCandidate", "error", "No playing voices found - this should not happen!");
+    }
+    
+    return bestCandidate;
+}
+
+// === PRIORITY MANAGEMENT ===
+
+/**
+ * @brief PÅ™iÅ™adÃ­ voice top prioritu (pro novÄ› spuÅ¡tÄ›nÃ© voices)
+ * NovÄ› alokovanÃ© voices dostÃ¡vajÃ­ nejvyÅ¡Å¡Ã­ prioritu
+ * @param voice Voice k povÃ½Å¡enÃ­
+ */
+void VoiceManager::assignTopPriority(SynthVoice* voice)
+{
+    if (!voice) return;
+    
+    // Najdi aktuÃ¡lnÄ› nejvyÅ¡Å¡Ã­ queue v systÃ©mu
+    uint8_t maxQueue = 0;
+    for (const auto& v : voices_) {
+        if (v.get() != voice && v->getQueue() > maxQueue) {
+            maxQueue = v->getQueue();
+        }
+    }
+    
+    // PÅ™iÅ™aÄ o 1 vyÅ¡Å¡Ã­ prioritu (pokud moÅ¾no)
+    uint8_t newQueue = (maxQueue < 254) ? (maxQueue + 1) : 254;
+    voice->setQueue(newQueue);
+    
+    logger_.log("VoiceManager/assignTopPriority", "debug", 
+               "Assigned top priority: queue=" + juce::String((int)newQueue));
+}
+
+/**
+ * @brief SnÃ­Å¾Ã­ prioritu voice (pro inactive voices)
+ * NeaktivnÃ­ voices dostÃ¡vajÃ­ nejniÅ¾Å¡Ã­ prioritu
+ * @param voice Voice k degradaci
+ */
+void VoiceManager::demotePriority(SynthVoice* voice)
+{
+    if (!voice) return;
+    
+    voice->setQueue(0);  // NejniÅ¾Å¡Ã­ priorita pro neaktivnÃ­ voices
+    
+    logger_.log("VoiceManager/demotePriority", "debug", "Voice demoted to lowest priority");
+}
+
+// === STATISTICS AND DIAGNOSTICS ===
+
+/**
+ * @brief VrÃ¡tÃ­ poÄet aktivnÃ­ch voices (Playing + Release)
+ * @return PoÄet aktuÃ¡lnÄ› aktivnÃ­ch voices
+ */
+int VoiceManager::getActiveVoiceCount() const
+{
+    int count = 0;
+    for (const auto& voice : voices_) {
+        if (voice->isActive()) ++count;
+    }
+    return count;
+}
+
+/**
+ * @brief VrÃ¡tÃ­ poÄet voices v kaÅ¾dÃ©m stavu
+ * @return Struct s poÄty pro kaÅ¾dÃ½ VoiceState
+ */
+VoiceManager::VoiceStateCounts VoiceManager::getVoiceStateCounts() const
+{
+    VoiceStateCounts counts;
+    
+    for (const auto& voice : voices_) {
+        if (voice->isInactive()) {
+            counts.inactive++;
+        } else if (voice->isPlaying()) {
+            counts.playing++;
+        } else if (voice->isInRelease()) {
+            counts.release++;
+        }
+    }
+    
+    return counts;
+}
+
+/**
+ * @brief VrÃ¡tÃ­ poÄet voices podle dynamic levelÅ¯
+ * @return Array s poÄty voices pro kaÅ¾dÃ½ dynamic level (0-7)
+ */
+std::array<int, 8> VoiceManager::getVoiceCountByDynamicLevel() const
+{
+    std::array<int, 8> counts{};
+    
+    for (const auto& voice : voices_) {
+        if (voice->isActive()) {
+            uint8_t level = voice->getDynamicLevel();
+            if (level < 8) {
+                counts[level]++;
+            }
+        }
+    }
+    
+    return counts;
+}
+
+/**
+ * @brief VrÃ¡tÃ­ detailnÃ­ statistiky voice manageru
+ * @return Kopie poslednÃ­ch statistik
+ */
+VoiceManager::VoiceStats VoiceManager::getVoiceStats() const
+{
+    return lastStats_;
+}
+
+/**
+ * @brief Aktualizuje internÃ­ statistiky
+ * VolÃ¡ se z refresh() pro cachovÃ¡nÃ­ vÃ½sledkÅ¯.
+ */
+void VoiceManager::updateStatistics() const
+{
+    VoiceStateCounts stateCounts = getVoiceStateCounts();
+    
+    lastStats_.totalVoices = static_cast<int>(voices_.size());
+    lastStats_.inactiveVoices = stateCounts.inactive;
+    lastStats_.playingVoices = stateCounts.playing;
+    lastStats_.releaseVoices = stateCounts.release;
+    lastStats_.activeVoices = lastStats_.playingVoices + lastStats_.releaseVoices;
+    
+    lastStats_.dynamicLevelCount = getVoiceCountByDynamicLevel();
+    lastStats_.voicesStolenThisRefresh = voicesStolenSinceLastRefresh_;
+    lastStats_.releaseVoicesStolen = releaseVoicesStolen_;
+    lastStats_.playingVoicesStolen = playingVoicesStolen_;
+    
+    // PrÅ¯mÄ›rnÃ½ progress aktivnÃ­ch voices
+    float totalProgress = 0.0f;
+    int activeCount = 0;
+    for (const auto& voice : voices_) {
+        if (voice->isActive()) {
+            totalProgress += voice->getProgress();
+            activeCount++;
+        }
+    }
+    lastStats_.averageProgress = (activeCount > 0) ? (totalProgress / activeCount) : 0.0f;
+}
+
+/**
+ * @brief Loguje periodickÃ½ status (kaÅ¾dÃ½ch PERIODIC_LOG_INTERVAL refresh cyklÅ¯)
+ * Poskytuje pÅ™ehled o stavu voice manageru pro debugging.
+ */
+void VoiceManager::logPeriodicStatus()
+{
+    const auto& stats = lastStats_;
+    
+    // SestavenÃ­ informacÃ­ o dynamic levelech
+    juce::String dynamicLevelInfo;
+    for (int i = 0; i < 8; ++i) {
+        if (stats.dynamicLevelCount[i] > 0) {
+            dynamicLevelInfo += "L" + juce::String(i) + ":" + juce::String(stats.dynamicLevelCount[i]) + " ";
+        }
+    }
+    
+    if (dynamicLevelInfo.isEmpty()) {
+        dynamicLevelInfo = "none";
+    }
+    
+    // SestavenÃ­ stealing statistics
+    juce::String stealingInfo;
+    if (stats.releaseVoicesStolen > 0 || stats.playingVoicesStolen > 0) {
+        stealingInfo = " stealing(release:" + juce::String(stats.releaseVoicesStolen) + 
+                      " playing:" + juce::String(stats.playingVoicesStolen) + ")";
+    }
+    
+    logger_.log("VoiceManager/periodicStatus", "info",
+               "Voices: " + juce::String(stats.activeVoices) + "/" + juce::String(stats.totalVoices) + 
+               " active (playing:" + juce::String(stats.playingVoices) + 
+               " release:" + juce::String(stats.releaseVoices) + 
+               " inactive:" + juce::String(stats.inactiveVoices) + ")" +
+               " avg_progress:" + juce::String(stats.averageProgress * 100.0f, 1) + "%" +
+               " levels:" + dynamicLevelInfo + stealingInfo);
+}
+
+
+===== File: VoiceManager.h =====
+Path: C:\Users\Jindrich Nemec\IthacaPlayer\VoiceManager.h
+=====
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+#include "SampleLibrary.h"
+#include "MidiStateManager.h"
+#include "Logger.h"
+
+// #define DEBUG_VOICE_MANAGER 1
+
+/**
+ * @enum VoiceState
+ * @brief Definuje moÅ¾nÃ© stavy voice pro release counter systÃ©m
+ * 
+ * MinimalistickÃ¡ varianta:
+ * - Inactive: Voice nenÃ­ pouÅ¾ita, dostupnÃ¡ pro alokaci
+ * - Playing: Voice aktivnÄ› hraje po note-on
+ * - Release: Voice v release fÃ¡zi s ÄasovÃ½m counterem (bez fade-out)
+ */
+enum class VoiceState {
+    Inactive,    // Voice nenÃ­ pouÅ¾ita - dostupnÃ¡ pro alokaci
+    Playing,     // AktivnÄ› hraje po note-on
+    Release      // V release fÃ¡zi s counterem (bez fade-out)
+};
+
+/**
+ * @class SynthVoice
+ * @brief MinimalistickÃ¡ voice s release counter mechanismem
+ * 
+ * KlÃ­ÄovÃ© vlastnosti:
+ * - StavovÃ½ automat (Inactive/Playing/Release)
+ * - Release counter pro automatickÃ© ukonÄenÃ­ po note-off
+ * - Å½Ã¡dnÃ½ fade-out - jen ÄasovÃ½ limit
+ * - JednoduchÃ¡ implementace pro rychlÃ© testovÃ¡nÃ­
+ */
+class SynthVoice
+{
+public:
+    SynthVoice();
+
+    /**
+     * @brief SpustÃ­ voice s automatickÃ½m vÃ½bÄ›rem dynamic levelu
+     * PÅ™echod: Inactive/Release â†’ Playing
+     * @param midiNote MIDI nota (21-108)
+     * @param velocity Velocity (automaticky mapovÃ¡no na dynamic level)
+     * @param library Reference na SampleLibrary
+     */
+    void start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library);
+
+    /**
+     * @brief SpustÃ­ release fÃ¡zi s ÄasovÃ½m counterem
+     * PÅ™echod: Playing â†’ Release
+     * Voice bude automaticky ukonÄena po RELEASE_DURATION_SAMPLES
+     */
+    void startRelease();
+
+    /**
+     * @brief OkamÅ¾itÄ› zastavÃ­ voice
+     * PÅ™echod: Playing/Release â†’ Inactive
+     */
+    void stop();
+
+    /**
+     * @brief Resetuje voice do vÃ½chozÃ­ho stavu
+     * PÅ™echod: Any â†’ Inactive
+     */
+    void reset();
+
+    /**
+     * @brief Renderuje audio s release counter management
+     * Automaticky poÄÃ­tÃ¡ release counter a ukonÄuje voice po vyprÅ¡enÃ­
+     * @param outputBuffer Ukazatel na buffer
+     * @param numSamples PoÄet samples k renderovÃ¡nÃ­
+     * @param isStereo Zda je output buffer stereo
+     */
+    void render(float* outputBuffer, int numSamples, bool isStereo = false);
+
+    // === State Query Methods ===
+    
+    /**
+     * @brief VracÃ­ true pokud voice je nÄ›jakÃ½m zpÅ¯sobem aktivnÃ­
+     * @return true pro Playing nebo Release state
+     */
+    bool isActive() const { return voiceState_ != VoiceState::Inactive; }
+    
+    /**
+     * @brief VracÃ­ true pokud voice aktivnÄ› hraje
+     * @return true pouze pro Playing state
+     */
+    bool isPlaying() const { return voiceState_ == VoiceState::Playing; }
+    
+    /**
+     * @brief VracÃ­ true pokud voice je v release fÃ¡zi
+     * @return true pouze pro Release state
+     */
+    bool isInRelease() const { return voiceState_ == VoiceState::Release; }
+    
+    /**
+     * @brief VracÃ­ true pokud voice je neaktivnÃ­
+     * @return true pouze pro Inactive state
+     */
+    bool isInactive() const { return voiceState_ == VoiceState::Inactive; }
+
+    // === Standard Getters ===
+    
+    uint8_t getNote() const { return midiNote_; }
+    uint8_t getVelocity() const { return velocity_; }
+    uint8_t getDynamicLevel() const { return currentDynamicLevel_; }
+    uint8_t getQueue() const { return queue_; }
+    uint32_t getPosition() const { return position_; }
+    uint32_t getSampleLength() const { return currentSampleLength_; }
+    VoiceState getVoiceState() const { return voiceState_; }
+    
+    void setQueue(uint8_t queue) { queue_ = queue; }
+
+    /**
+     * @brief VrÃ¡tÃ­ progress jako procenta (0.0-1.0)
+     * PouÅ¾Ã­vÃ¡ se pro voice stealing prioritu
+     */
+    float getProgress() const {
+        return (currentSampleLength_ > 0) ? 
+               static_cast<float>(position_) / static_cast<float>(currentSampleLength_) : 0.0f;
+    }
+
+    /**
+     * @brief VrÃ¡tÃ­ zbÃ½vajÃ­cÃ­ samples v release counteru
+     * Pro debugging ÃºÄely
+     */
+    uint32_t getReleaseCounterRemaining() const {
+        return (releaseCounter_ < RELEASE_DURATION_SAMPLES) ? 
+               (RELEASE_DURATION_SAMPLES - releaseCounter_) : 0;
+    }
+
+private:
+    Logger& logger_;                    // Reference na logger
+
+    // === Voice State Management ===
+    VoiceState voiceState_{VoiceState::Inactive};  // StavovÃ½ automat
+    uint8_t midiNote_{0};              // AktuÃ¡lnÃ­ MIDI nota
+    uint8_t velocity_{0};              // Velocity
+    uint8_t currentDynamicLevel_{0};   // AktuÃ¡lnÃ­ dynamic level (0-7)
+
+    // === Sample Data ===
+    const float* sampleData_{nullptr}; // Ukazatel na data vzorku
+    uint32_t currentSampleLength_{0};  // DÃ©lka aktuÃ¡lnÃ­ho sample
+    uint32_t position_{0};             // AktuÃ¡lnÃ­ pozice v vzorku
+    bool currentSampleIsStereo_{false}; // Zda je aktuÃ¡lnÃ­ sample stereo
+
+    // === Voice Management ===
+    uint8_t queue_{0};                 // PrioritnÃ­ queue pro stealing
+
+    // === Release Counter Mechanism ===
+    uint32_t releaseCounter_{0};       // Counter pro release fÃ¡zi
+    
+public:
+    static constexpr uint32_t RELEASE_DURATION_SAMPLES = 4800;  // 100ms @ 48kHz
+    
+private:
+    static constexpr double ASSUMED_SAMPLE_RATE = 48000.0;      // Pro vÃ½poÄty
+
+    /**
+     * @brief Najde nejlepÅ¡Ã­ dostupnÃ½ dynamic level pro danou notu
+     * Implementuje spiral search s fallback logikou
+     * @param library Reference na SampleLibrary
+     * @param midiNote MIDI nota
+     * @param preferredLevel PreferovanÃ½ level z velocity mapping
+     * @return NejlepÅ¡Ã­ dostupnÃ½ level nebo 255 pokud Å¾Ã¡dnÃ½
+     */
+    uint8_t findBestAvailableLevel(const SampleLibrary& library, uint8_t midiNote, uint8_t preferredLevel);
+};
+
+/**
+ * @class VoiceManager
+ * @brief Voice manager s minimalistickÃ½m release counter systÃ©mem
+ * 
+ * KlÃ­ÄovÃ© vlastnosti pro rychlÃ© testovÃ¡nÃ­:
+ * - Release counter mÃ­sto ADSR envelope
+ * - Intelligent voice stealing (preferuje release voices)
+ * - Note restart detection (monofonie per nota)
+ * - Dynamic level fallback mechanism
+ * - JednoduchÃ© automatickÃ© ukonÄenÃ­ voices
+ */
+class VoiceManager
+{
+public:
+    /**
+     * @brief Konstruktor s referencÃ­ na SampleLibrary
+     * @param library Reference na SampleLibrary (musÃ­ bÃ½t platnÃ¡ po celou dobu Å¾ivota)
+     * @param numVoices PoÄet voices (vÃ½chozÃ­ 16)
+     */
+    VoiceManager(const SampleLibrary& library, int numVoices = 16);
+
+    ~VoiceManager() = default;
+
+    /**
+     * @brief Zpracuje MIDI udÃ¡losti z MidiStateManager
+     * HlavnÃ­ vstupnÃ­ bod pro MIDI data
+     * @param midiState Reference na MidiStateManager
+     */
+    void processMidiEvents(MidiStateManager& midiState);
+
+    /**
+     * @brief Generuje audio mixem vÅ¡ech aktivnÃ­ch voices
+     * @param buffer Ukazatel na audio buffer (stereo interleaved)
+     * @param numSamples PoÄet samples per channel
+     */
+    void generateAudio(float* buffer, int numSamples);
+
+    /**
+     * @brief Housekeeping a statistiky
+     * PravidelnÄ› volanÃ¡ ÃºdrÅ¾ba
+     */
+    void refresh();
+
+    // === Statistics & Diagnostics ===
+    
+    /**
+     * @brief VrÃ¡tÃ­ poÄet aktivnÃ­ch voices (Playing + Release)
+     */
+    int getActiveVoiceCount() const;
+    
+    /**
+     * @brief VrÃ¡tÃ­ poÄet voices v kaÅ¾dÃ©m stavu
+     */
+    struct VoiceStateCounts {
+        int inactive;
+        int playing; 
+        int release;
+        
+        VoiceStateCounts() : inactive(0), playing(0), release(0) {}
+    };
+    
+    VoiceStateCounts getVoiceStateCounts() const;
+    
+    /**
+     * @brief VrÃ¡tÃ­ poÄet voices podle dynamic levelÅ¯
+     */
+    std::array<int, 8> getVoiceCountByDynamicLevel() const;
+    
+    /**
+     * @brief MinimalistickÃ© voice statistics
+     */
+    struct VoiceStats {
+        int totalVoices;
+        int activeVoices;              // Playing + Release
+        int playingVoices;             // Pouze Playing
+        int releaseVoices;             // Pouze Release
+        int inactiveVoices;            // Inactive
+        std::array<int, 8> dynamicLevelCount;
+        float averageProgress;
+        int voicesStolenThisRefresh;
+        int releaseVoicesStolen;       // Kolik release voices bylo ukradeno
+        int playingVoicesStolen;       // Kolik playing voices bylo ukradeno
+        
+        VoiceStats() : totalVoices(0), activeVoices(0), playingVoices(0), 
+                       releaseVoices(0), inactiveVoices(0), dynamicLevelCount{}, 
+                       averageProgress(0.0f), voicesStolenThisRefresh(0),
+                       releaseVoicesStolen(0), playingVoicesStolen(0) {}
+    };
+    
+    VoiceStats getVoiceStats() const;
+
+private:
+    Logger& logger_;                                        // Reference na logger
+    const SampleLibrary& sampleLibrary_;                   // Reference na vzorky
+    std::vector<std::unique_ptr<SynthVoice>> voices_;      // Pool voices
+    
+    // === Statistics ===
+    mutable VoiceStats lastStats_;                         // Cache poslednÃ­ch statistik
+    int voicesStolenSinceLastRefresh_{0};                  // Voice stealing counter
+    int releaseVoicesStolen_{0};                           // Release voices stolen counter
+    int playingVoicesStolen_{0};                           // Playing voices stolen counter
+    
+    /**
+     * @brief SpustÃ­ voice s comprehensive allocation strategy
+     * 
+     * ALGORITMUS ALOKACE (v poÅ™adÃ­ priority):
+     * 1. Note restart detection - stejnÃ¡ nota na stejnÃ©m voice
+     * 2. Free voice allocation - najdi neaktivnÃ­ voice
+     * 3. Release voice stealing - ukradni nejstarÅ¡Ã­ release voice
+     * 4. Playing voice stealing - ukradni nejstarÅ¡Ã­ playing voice (last resort)
+     * 
+     * @param midiNote MIDI nota
+     * @param velocity Velocity
+     */
+    void startVoice(uint8_t midiNote, uint8_t velocity);
+
+    /**
+     * @brief SpustÃ­ release counter pro danou notu
+     * PÅ™echod Playing â†’ Release (spustÃ­ ÄasovÃ½ counter)
+     * @param midiNote MIDI nota k release
+     */
+    void stopVoice(uint8_t midiNote);
+
+    // === Voice Allocation Helpers ===
+    
+    /**
+     * @brief Najde voice jiÅ¾ hrajÃ­cÃ­ specifickou notu
+     * Pro note restart detection
+     * @param midiNote Nota k vyhledÃ¡nÃ­
+     * @return Voice hrajÃ­cÃ­ tuto notu nebo nullptr
+     */
+    SynthVoice* findVoicePlayingNote(uint8_t midiNote);
+    
+    /**
+     * @brief Najde nejlepÅ¡Ã­ neaktivnÃ­ voice
+     * @return NejlepÅ¡Ã­ free voice nebo nullptr
+     */
+    SynthVoice* findBestFreeVoice();
+    
+    /**
+     * @brief Najde nejlepÅ¡Ã­ release voice pro stealing
+     * Preferuje nejstarÅ¡Ã­ release voices
+     * @return NejlepÅ¡Ã­ release candidate nebo nullptr
+     */
+    SynthVoice* findBestReleaseCandidate();
+    
+    /**
+     * @brief Najde nejlepÅ¡Ã­ playing voice pro stealing (last resort)
+     * Preferuje nejstarÅ¡Ã­ + nejvyÅ¡Å¡Ã­ progress
+     * @return NejlepÅ¡Ã­ playing candidate nebo nullptr
+     */
+    SynthVoice* findBestPlayingCandidate();
+
+    // === Priority Management ===
+    
+    /**
+     * @brief PÅ™iÅ™adÃ­ voice top prioritu (pro novÄ› spuÅ¡tÄ›nÃ©)
+     * @param voice Voice k povÃ½Å¡enÃ­
+     */
+    void assignTopPriority(SynthVoice* voice);
+    
+    /**
+     * @brief SnÃ­Å¾Ã­ prioritu voice (pro inactive voices)
+     * @param voice Voice k degradaci
+     */
+    void demotePriority(SynthVoice* voice);
+    
+    /**
+     * @brief Aktualizuje statistiky (volanÃ© z refresh())
+     */
+    void updateStatistics() const;
+    
+    /**
+     * @brief Loguje periodic status
+     */
+    void logPeriodicStatus();
+    
+    // === Constants ===
+    static constexpr int PERIODIC_LOG_INTERVAL = 1000;    // Log kaÅ¾dÃ½ch 1000 refresh cyklÅ¯
+    mutable int refreshCounter_{0};                        // PoÄÃ­tadlo refresh cyklÅ¯
+};
+
+

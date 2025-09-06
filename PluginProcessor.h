@@ -2,6 +2,11 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <array>
+#include <chrono>
 #include "SampleLibrary.h"
 #include "VoiceManager.h"
 #include "MidiStateManager.h"
@@ -17,9 +22,10 @@ enum class SynthState {
 
 /**
  * @class AudioPluginAudioProcessor
- * @brief Hlavní audio procesor pluginu s optimalizovaným handlingem.
+ * @brief Hlavní audio procesor pluginu s optimalizovaným handlingem a triple buffering.
  * 
- * Spravuje inicializaci, audio/MIDI a zdroje. Refaktorováno pro nižší latenci a čitelnost.
+ * Spravuje inicializaci, audio/MIDI a zdroje. Refaktorováno pro nižší latenci pomocí
+ * triple buffering a samostatného render threadu s lock-free komunikací.
  */
 class AudioPluginAudioProcessor : public juce::AudioProcessor
 {
@@ -68,17 +74,48 @@ private:
     double sampleRate_{0.0};
     int samplesPerBlock_{0};
 
-    /**
-     * @brief Inicializuje syntetizér s kontrolou paměti.
-     * Dynamicky rozhoduje o plné nebo rychlé inicializaci.
-     */
-    void initializeSynth();
+    // Triple buffering pro nižší latenci
+    static constexpr int BUFFER_COUNT = 3;
+    std::array<std::vector<float>, BUFFER_COUNT> audioBuffers_;
+    std::atomic<int> currentReadBuffer_{0};
+    std::atomic<int> currentWriteBuffer_{0};
+    std::atomic<bool> isBufferReady_{false};
+    
+    // Render thread a synchronizace
+    std::thread renderThread_;
+    std::atomic<bool> shouldStop_{false};
+    std::condition_variable renderSignal_;
+    std::mutex renderMutex_;
+    
+    // Lock-free MIDI komunikace
+    struct MidiEvent {
+        juce::MidiMessage message;
+        int samplePosition;
+    };
+    
+    static constexpr int MIDI_QUEUE_SIZE = 512;
+    std::array<MidiEvent, MIDI_QUEUE_SIZE> midiQueue_;
+    std::atomic<int> midiReadIndex_{0};
+    std::atomic<int> midiWriteIndex_{0};
+    std::mutex midiMutex_;
 
     /**
-     * @brief Handling chyb.
-     * @param errorMessage Zpráva o chybě.
+     * @brief Inicializuje syntetizér s kontrolou paměti.
      */
+    void initializeSynth();
     void handleSynthError(const juce::String& errorMessage);
+    void startRenderThread();
+    void stopRenderThread();
+    void renderThreadFunction();
+
+    // Lock-free MIDI operace
+    bool pushMidiEvent(const juce::MidiMessage& message, int samplePosition);
+    bool popMidiEvent(MidiEvent& event);
+    void clearMidiQueue();
+
+    // Pomocné metody pro efektivnější zpracování
+    void processMidiInRealTime(const juce::MidiBuffer& midiMessages);
+    void copyAudioBuffer(juce::AudioBuffer<float>& dest, const std::vector<float>& src);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
 };

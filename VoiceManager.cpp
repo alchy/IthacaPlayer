@@ -22,12 +22,23 @@ SynthVoice::SynthVoice()
  */
 void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& library)
 {
-    // Reset předchozího stavu (důležité při restart stejné noty)
+    // OPTIMALIZACE: Rychlý restart stejné noty bez full resetu
+    if (voiceState_ == VoiceState::Playing && midiNote_ == midiNote) 
+    {
+        // Pouze aktualizuj velocity a resetuj pozici
+        velocity_ = velocity;
+        currentDynamicLevel_ = library.velocityToDynamicLevel(velocity);
+        position_ = 0;
+        releaseCounter_ = 0;
+        return;
+    }
+
+    // Plný reset při změně noty
     reset();
 
     midiNote_ = midiNote;
     velocity_ = velocity;
-    voiceState_ = VoiceState::Playing;  // Přechod do Playing state
+    voiceState_ = VoiceState::Playing;
 
     // Mapování velocity na dynamic level (0-7)
     uint8_t preferredLevel = library.velocityToDynamicLevel(velocity);
@@ -61,14 +72,16 @@ void SynthVoice::start(uint8_t midiNote, uint8_t velocity, const SampleLibrary& 
 
     // Inicializace playback stavu
     position_ = 0;
-    releaseCounter_ = 0;  // Reset release counter
+    releaseCounter_ = 0;
 
-    logger_.log("SynthVoice/start", "debug", 
-               "Voice started: note=" + juce::String((int)midiNote) + 
-               " vel=" + juce::String((int)velocity) +
-               " level=" + juce::String((int)currentDynamicLevel_) +
-               " length=" + juce::String(currentSampleLength_) +
-               " stereo=" + juce::String(currentSampleIsStereo_ ? "yes" : "no"));
+    // REDUKOVANÉ LOGOVÁNÍ - pouze každých 50 startů
+    static int startCounter = 0;
+    if (++startCounter % 50 == 0) {
+        logger_.log("SynthVoice/start", "debug", 
+                   "Voice started: note=" + juce::String((int)midiNote) + 
+                   " vel=" + juce::String((int)velocity) +
+                   " level=" + juce::String((int)currentDynamicLevel_));
+    }
 }
 
 /**
@@ -80,15 +93,16 @@ void SynthVoice::startRelease()
 {
     if (voiceState_ == VoiceState::Playing) {
         voiceState_ = VoiceState::Release;
-        releaseCounter_ = 0;  // Reset release counter na začátek
+        releaseCounter_ = 0;
         
-        // Výpočet release doby pro informaci
-        double releaseTimeMs = (static_cast<double>(RELEASE_DURATION_SAMPLES) / ASSUMED_SAMPLE_RATE) * 1000.0;
-        
-        logger_.log("SynthVoice/startRelease", "debug", 
-                   "Voice entering release phase: note=" + juce::String((int)midiNote_) +
-                   " duration=" + juce::String(RELEASE_DURATION_SAMPLES) + " samples" +
-                   " (" + juce::String(releaseTimeMs, 1) + "ms)");
+        // REDUKOVANÉ LOGOVÁNÍ - pouze každých 100 release
+        static int releaseCounter = 0;
+        if (++releaseCounter % 100 == 0) {
+            double releaseTimeMs = (static_cast<double>(RELEASE_DURATION_SAMPLES) / ASSUMED_SAMPLE_RATE) * 1000.0;
+            logger_.log("SynthVoice/startRelease", "debug", 
+                       "Voice release: note=" + juce::String((int)midiNote_) +
+                       " (" + juce::String(releaseTimeMs, 1) + "ms)");
+        }
     }
 }
 
@@ -99,8 +113,6 @@ void SynthVoice::startRelease()
 void SynthVoice::stop()
 {
     voiceState_ = VoiceState::Inactive;
-    logger_.log("SynthVoice/stop", "debug", 
-               "Voice stopped immediately: note=" + juce::String((int)midiNote_));
 }
 
 /**
@@ -118,7 +130,7 @@ void SynthVoice::reset()
     position_ = 0;
     queue_ = 0;
     currentSampleIsStereo_ = false;
-    releaseCounter_ = 0;  // Reset release counter
+    releaseCounter_ = 0;
 }
 
 /**
@@ -131,73 +143,79 @@ void SynthVoice::reset()
  */
 void SynthVoice::render(float* outputBuffer, int numSamples, bool isStereo)
 {
-    // Renderuj pouze pokud voice je aktivní (Playing nebo Release)
+    // RYCHLÁ EXIT CONDITION - žádné aktivní voice nebo data
     if (!isActive() || sampleData_ == nullptr || currentSampleLength_ == 0 || !outputBuffer)
         return;
 
-    // Hlavní rendering loop s release counter management
-    for (int i = 0; i < numSamples; ++i) {
-        // === KONTROLA UKONČENÍ ===
-        bool shouldStop = false;
-        juce::String stopReason;
-        
-        // Kontrola konce sample (platí pro Playing i Release)
-        if (position_ >= currentSampleLength_) {
-            shouldStop = true;
-            stopReason = "end of sample";
-        }
-        
-        // === RELEASE COUNTER MANAGEMENT ===
-        if (voiceState_ == VoiceState::Release) {
-            releaseCounter_++;
-            
-            // Kontrola vypršení release času
-            if (releaseCounter_ >= RELEASE_DURATION_SAMPLES) {
-                shouldStop = true;
-                stopReason = "release timer expired";
-            }
-        }
-        
-        // Ukončení voice pokud je potřeba
-        if (shouldStop) {
+    // OPTIMALIZACE: Předpočítané hodnoty pro rychlejší přístup
+    const bool sampleIsStereo = currentSampleIsStereo_;
+    const uint32_t maxPosition = currentSampleLength_;
+    const float* samplePtr = sampleData_;
+    const uint32_t currentPos = position_;
+    
+    // RYCHLÁ KONTROLA KONCE SAMPLU
+    if (currentPos >= maxPosition) {
+        voiceState_ = VoiceState::Inactive;
+        return;
+    }
+    
+    // RYCHLÁ KONTROLA RELEASE COUNTERU
+    if (voiceState_ == VoiceState::Release) {
+        if (releaseCounter_ >= RELEASE_DURATION_SAMPLES) {
             voiceState_ = VoiceState::Inactive;
-            logger_.log("SynthVoice/render", "debug", 
-                       "Voice auto-stopped: note=" + juce::String((int)midiNote_) + 
-                       " reason=" + stopReason + 
-                       " position=" + juce::String(position_) + "/" + juce::String(currentSampleLength_) +
-                       " release_counter=" + juce::String(releaseCounter_));
-            break;
+            return;
         }
-        
-        // === AUDIO RENDERING (bez fade-out - minimalistická varianta) ===
-        // Poznámka: V budoucnu zde bude aplikace ADSR envelope gain
-        
-        if (isStereo) {
-            // === STEREO OUTPUT ===
-            if (currentSampleIsStereo_) {
-                // Stereo sample → stereo output (přímé kopírování)
-                outputBuffer[i * 2] += sampleData_[position_ * 2];         // Left channel
-                outputBuffer[i * 2 + 1] += sampleData_[position_ * 2 + 1]; // Right channel
-            } else {
-                // Mono sample → stereo output (duplikace na oba kanály)
-                float sample = sampleData_[position_];
-                outputBuffer[i * 2] += sample;     // Left channel
-                outputBuffer[i * 2 + 1] += sample; // Right channel
+    }
+    
+    // VYPOČET SKUTEČNÉHO POČTU SAMPLES K RENDEROVÁNÍ
+    const uint32_t samplesToRender = (numSamples < (maxPosition - currentPos)) ? 
+                                    numSamples : (maxPosition - currentPos);
+    
+    // OPTIMALIZACE: SPECIFICKÉ RENDERING CESTY PRO RŮZNÉ PŘÍPADY
+    if (isStereo) {
+        if (sampleIsStereo) {
+            // OPTIMALIZACE: Stereo sample → Stereo output (přímé kopírování)
+            for (uint32_t i = 0; i < samplesToRender; ++i) {
+                const uint32_t sampleIndex = (currentPos + i) * 2;
+                outputBuffer[i * 2] += samplePtr[sampleIndex];
+                outputBuffer[i * 2 + 1] += samplePtr[sampleIndex + 1];
             }
         } else {
-            // === MONO OUTPUT ===
-            if (currentSampleIsStereo_) {
-                // Stereo sample → mono output (mix L+R s -3dB kompenzací)
-                float left = sampleData_[position_ * 2];
-                float right = sampleData_[position_ * 2 + 1];
-                outputBuffer[i] += (left + right) * 0.5f;
-            } else {
-                // Mono sample → mono output (přímé kopírování)
-                outputBuffer[i] += sampleData_[position_];
+            // OPTIMALIZACE: Mono sample → Stereo output (duplikace)
+            for (uint32_t i = 0; i < samplesToRender; ++i) {
+                const float sample = samplePtr[currentPos + i];
+                outputBuffer[i * 2] += sample;
+                outputBuffer[i * 2 + 1] += sample;
             }
         }
-        
-        ++position_;
+    } else {
+        // OPTIMALIZACE: Mono output
+        if (sampleIsStereo) {
+            for (uint32_t i = 0; i < samplesToRender; ++i) {
+                const uint32_t sampleIndex = (currentPos + i) * 2;
+                outputBuffer[i] += (samplePtr[sampleIndex] + samplePtr[sampleIndex + 1]) * 0.5f;
+            }
+        } else {
+            for (uint32_t i = 0; i < samplesToRender; ++i) {
+                outputBuffer[i] += samplePtr[currentPos + i];
+            }
+        }
+    }
+    
+    // AKTUALIZACE POZICE
+    position_ += samplesToRender;
+    
+    // AKTUALIZACE RELEASE COUNTERU
+    if (voiceState_ == VoiceState::Release) {
+        releaseCounter_ += samplesToRender;
+        if (releaseCounter_ >= RELEASE_DURATION_SAMPLES) {
+            voiceState_ = VoiceState::Inactive;
+        }
+    }
+    
+    // KONEČNÁ KONTROLA KONCE SAMPLU
+    if (position_ >= maxPosition) {
+        voiceState_ = VoiceState::Inactive;
     }
 }
 
@@ -222,9 +240,6 @@ uint8_t SynthVoice::findBestAvailableLevel(const SampleLibrary& library, uint8_t
         if (preferredLevel >= offset) {
             uint8_t lowerLevel = static_cast<uint8_t>(preferredLevel - offset);
             if (library.isNoteAvailable(midiNote, lowerLevel)) {
-                logger_.log("SynthVoice/findBestAvailableLevel", "debug",
-                           "Fallback to lower level " + juce::String((int)lowerLevel) + 
-                           " instead of " + juce::String((int)preferredLevel));
                 return lowerLevel;
             }
         }
@@ -232,16 +247,11 @@ uint8_t SynthVoice::findBestAvailableLevel(const SampleLibrary& library, uint8_t
         // Zkus vyšší level (tvrdší dynamika)
         uint8_t higherLevel = static_cast<uint8_t>(preferredLevel + offset);
         if (higherLevel < 8 && library.isNoteAvailable(midiNote, higherLevel)) {
-            logger_.log("SynthVoice/findBestAvailableLevel", "debug",
-                       "Fallback to higher level " + juce::String((int)higherLevel) + 
-                       " instead of " + juce::String((int)preferredLevel));
             return higherLevel;
         }
     }
 
     // 3. Žádný level není dostupný
-    logger_.log("SynthVoice/findBestAvailableLevel", "error",
-               "No dynamic level available for note " + juce::String((int)midiNote));
     return 255;
 }
 
@@ -267,7 +277,7 @@ VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
     voices_.reserve(numVoices);
     for (int i = 0; i < numVoices; ++i) {
         voices_.emplace_back(std::make_unique<SynthVoice>());
-        voices_.back()->setQueue(0);  // Všechny voices začínají s nejnižší prioritou
+        voices_.back()->setQueue(0);
     }
 
     // Reset statistik
@@ -278,8 +288,7 @@ VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
     refreshCounter_ = 0;
 
     logger_.log("VoiceManager/constructor", "info", 
-               "Minimalist VoiceManager created with " + juce::String(numVoices) + 
-               " voices and release counter system");
+               "VoiceManager created with " + juce::String(numVoices) + " voices");
 }
 
 /**
@@ -290,43 +299,51 @@ VoiceManager::VoiceManager(const SampleLibrary& library, int numVoices)
 void VoiceManager::processMidiEvents(MidiStateManager& midiState)
 {
     int totalNotesProcessed = 0;
+    auto processStart = juce::Time::getMillisecondCounterHiRes();
 
     // === ZPRACOVÁNÍ NOTE ON UDÁLOSTÍ ===
     for (int ch = 0; ch < 16; ++ch) {
         while (true) {
             uint8_t rawNote = midiState.popNoteOn(static_cast<uint8_t>(ch));
-            if (rawNote == 255) break;  // Prázdná fronta
+            if (rawNote == 255) break;
             
             uint8_t note = rawNote;
             uint8_t velocity = midiState.getVelocity(static_cast<uint8_t>(ch), note);
             
-            // Validace MIDI dat
             if (velocity == 0) {
-                // Velocity 0 je note-off
                 stopVoice(note);
             } else {
                 startVoice(note, velocity);
                 totalNotesProcessed++;
             }
+            
+            // Safety limit pro zachování responsiveness
+            if (totalNotesProcessed >= 30) break;
         }
+        if (totalNotesProcessed >= 30) break;
     }
 
     // === ZPRACOVÁNÍ NOTE OFF UDÁLOSTÍ ===
     for (int ch = 0; ch < 16; ++ch) {
         while (true) {
             uint8_t rawNote = midiState.popNoteOff(static_cast<uint8_t>(ch));
-            if (rawNote == 255) break;  // Prázdná fronta
+            if (rawNote == 255) break;
             
-            uint8_t note = rawNote;
-            stopVoice(note);  // Spustí release counter
+            stopVoice(rawNote);
             totalNotesProcessed++;
+            
+            // Safety limit
+            if (totalNotesProcessed >= 50) break;
         }
+        if (totalNotesProcessed >= 50) break;
     }
 
-    // Logování pouze při zpracování událostí
-    if (totalNotesProcessed > 0) {
+    // LOGOVÁNÍ POUZE PŘI VYSOKÉM ZATÍŽENÍ
+    auto processTime = juce::Time::getMillisecondCounterHiRes() - processStart;
+    if (processTime > 1.0 || totalNotesProcessed > 10) {
         logger_.log("VoiceManager/processMidiEvents", "debug", 
-                   "Processed " + juce::String(totalNotesProcessed) + " MIDI events");
+                   "Processed " + juce::String(totalNotesProcessed) + " events in " + 
+                   juce::String(processTime, 1) + "ms");
     }
 }
 
@@ -338,19 +355,28 @@ void VoiceManager::processMidiEvents(MidiStateManager& midiState)
  */
 void VoiceManager::generateAudio(float* buffer, int numSamples)
 {
-    // Základní validace
+    // ZÁKLADNÍ VALIDACE
     if (buffer == nullptr || numSamples <= 0) {
-        logger_.log("VoiceManager/generateAudio", "warn", "Invalid buffer or sample count");
         return;
     }
 
-    // Předpokládáme stereo output (standard pro plugin)
-    bool isStereoOutput = true;
+    // OPTIMALIZACE: RYCHLÝ VÝSTUP POKUD ŽÁDNÉ AKTIVNÍ VOICES
+    bool hasActiveVoices = false;
+    for (auto& voice : voices_) {
+        if (voice->isActive()) {
+            hasActiveVoices = true;
+            break;
+        }
+    }
+    if (!hasActiveVoices) return;
+
+    // PŘEDPOKLÁDÁME STEREO OUTPUT
+    constexpr bool isStereoOutput = true;
     int activeVoiceCount = 0;
     int playingCount = 0;
     int releaseCount = 0;
     
-    // Mix všech aktivních voices (Playing + Release)
+    // MIX VŠECH AKTIVNÍCH VOICES
     for (auto& voice : voices_) {
         if (voice->isActive()) {
             voice->render(buffer, numSamples, isStereoOutput);
@@ -364,7 +390,7 @@ void VoiceManager::generateAudio(float* buffer, int numSamples)
         }
     }
 
-    // Logování pouze při změně stavu
+    // REDUKOVANÉ LOGOVÁNÍ - pouze při změně stavu
     static int lastActiveCount = 0;
     static int lastPlayingCount = 0;
     static int lastReleaseCount = 0;
@@ -372,11 +398,6 @@ void VoiceManager::generateAudio(float* buffer, int numSamples)
     if (activeVoiceCount != lastActiveCount || 
         playingCount != lastPlayingCount || 
         releaseCount != lastReleaseCount) {
-        
-        logger_.log("VoiceManager/generateAudio", "debug", 
-                   "Active voices: " + juce::String(activeVoiceCount) + 
-                   " (playing: " + juce::String(playingCount) + 
-                   ", release: " + juce::String(releaseCount) + ")");
         
         lastActiveCount = activeVoiceCount;
         lastPlayingCount = playingCount;
@@ -420,99 +441,60 @@ void VoiceManager::refresh()
  */
 void VoiceManager::startVoice(uint8_t midiNote, uint8_t velocity)
 {
-    logger_.log("VoiceManager/startVoice", "debug", 
-               "=== VOICE ALLOCATION START: note=" + juce::String((int)midiNote) + 
-               " vel=" + juce::String((int)velocity) + " ===");
+    // REDUKOVANÉ LOGOVÁNÍ - pouze každých 25 volání
+    static int callCounter = 0;
+    bool shouldLog = (++callCounter % 25 == 0);
+    
+    if (shouldLog) {
+        logger_.log("VoiceManager/startVoice", "debug", 
+                   "Allocation: note=" + juce::String((int)midiNote) + 
+                   " vel=" + juce::String((int)velocity));
+    }
 
     // === KROK 1: NOTE RESTART DETECTION ===
-    // Stejná nota musí být vždy na stejném voice (monofonie per nota)
-    // Důvod: Přirozené chování syntezátoru + prevent phase issues
     SynthVoice* existingVoice = findVoicePlayingNote(midiNote);
     if (existingVoice) {
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "STEP 1: Note restart detected - reusing existing voice");
-        
-        // RESTART existující voice s novou velocity
         existingVoice->start(midiNote, velocity, sampleLibrary_);
-        // ZACHOVÁNÍ queue priority - voice zůstává na stejné pozici
-        
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "SUCCESS: Restarted existing voice for note " + juce::String((int)midiNote) +
-                   " with velocity " + juce::String((int)velocity));
         return;
     }
 
     // === KROK 2: FREE VOICE ALLOCATION ===
-    // Hledáme nejlepší neaktivní voice (Inactive state)
-    // Preferujeme voice s nejnižší prioritou (nejdéle nepoužitá)
     SynthVoice* freeVoice = findBestFreeVoice();
     if (freeVoice) {
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "STEP 2: Free voice found - allocating");
-        
         freeVoice->start(midiNote, velocity, sampleLibrary_);
-        assignTopPriority(freeVoice);  // Nová voice dostává top prioritu
-        
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "SUCCESS: Allocated free voice for note " + juce::String((int)midiNote));
+        assignTopPriority(freeVoice);
         return;
     }
 
     // === KROK 3: RELEASE VOICE STEALING ===
-    // Preferujeme ukradnout voice v release fázi (dokončuje release counter)
-    // Důvod: Minimální audio impact, přirozené chování
     SynthVoice* releaseVoice = findBestReleaseCandidate();
     if (releaseVoice) {
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "STEP 3: Release voice stealing - taking voice in release phase");
-        
         uint8_t stolenNote = releaseVoice->getNote();
-        uint32_t releaseRemaining = releaseVoice->getReleaseCounterRemaining();
-        
         releaseVoice->start(midiNote, velocity, sampleLibrary_);
         assignTopPriority(releaseVoice);
         
-        // Statistiky
         voicesStolenSinceLastRefresh_++;
         releaseVoicesStolen_++;
-        
-        logger_.log("VoiceManager/startVoice", "debug", 
-                   "SUCCESS: Stole release voice - note " + juce::String((int)midiNote) + 
-                   " replaced note " + juce::String((int)stolenNote) + 
-                   " (had " + juce::String(releaseRemaining) + " samples remaining)");
         return;
     }
 
     // === KROK 4: PLAYING VOICE STEALING (LAST RESORT) ===
-    // Krajní řešení - ukradneme aktivně hrající voice
-    // Preferujeme nejstarší + nejvíce dokončený (minimální audio disruption)
     SynthVoice* playingVoice = findBestPlayingCandidate();
     if (playingVoice) {
-        logger_.log("VoiceManager/startVoice", "warn", 
-                   "STEP 4: Playing voice stealing - last resort activated");
-        
         uint8_t stolenNote = playingVoice->getNote();
-        float stolenProgress = playingVoice->getProgress();
-        
         playingVoice->start(midiNote, velocity, sampleLibrary_);
         assignTopPriority(playingVoice);
         
-        // Statistiky
         voicesStolenSinceLastRefresh_++;
         playingVoicesStolen_++;
-        
-        logger_.log("VoiceManager/startVoice", "warn", 
-                   "SUCCESS: Stole playing voice - note " + juce::String((int)midiNote) + 
-                   " replaced note " + juce::String((int)stolenNote) + 
-                   " (was " + juce::String(stolenProgress * 100.0f, 1) + "% complete)");
         return;
     }
 
     // === KROK 5: ALLOCATION FAILURE ===
-    // Nemělo by se nikdy stát, ale pro robustnost
-    logger_.log("VoiceManager/startVoice", "error", 
-               "FAILURE: Cannot allocate voice for note " + juce::String((int)midiNote) + 
-               " - all allocation strategies failed!");
+    if (shouldLog) {
+        logger_.log("VoiceManager/startVoice", "error", 
+                   "Allocation failed for note " + juce::String((int)midiNote));
+    }
 }
 
 /**
@@ -525,19 +507,10 @@ void VoiceManager::stopVoice(uint8_t midiNote)
     // Najdi voice hrající tuto notu (pouze Playing state)
     for (auto& voice : voices_) {
         if (voice->isPlaying() && voice->getNote() == midiNote) {
-            // Spustí release counter místo immediate stop
             voice->startRelease();
-            // Queue priorita se NEMĚNÍ - voice pokračuje na stejné pozici
-            
-            logger_.log("VoiceManager/stopVoice", "debug", 
-                       "Started release counter for note " + juce::String((int)midiNote));
             return;
         }
     }
-    
-    // Nota nebyla nalezena - může být normální při rychlém MIDI trafficu
-    logger_.log("VoiceManager/stopVoice", "debug", 
-               "Note " + juce::String((int)midiNote) + " not found for release (already stopped?)");
 }
 
 // === VOICE ALLOCATION HELPER METHODS ===
@@ -551,8 +524,7 @@ void VoiceManager::stopVoice(uint8_t midiNote)
 SynthVoice* VoiceManager::findVoicePlayingNote(uint8_t midiNote)
 {
     for (auto& voice : voices_) {
-        // Hledáme v Playing i Release state (obě můžou být "restarted")
-        if (voice->isActive() && voice->getNote() == midiNote) {
+        if (voice->isPlaying() && voice->getNote() == midiNote) {
             return voice.get();
         }
     }
@@ -568,7 +540,7 @@ SynthVoice* VoiceManager::findVoicePlayingNote(uint8_t midiNote)
 SynthVoice* VoiceManager::findBestFreeVoice()
 {
     SynthVoice* bestCandidate = nullptr;
-    uint8_t lowestQueue = 255;  // Hledáme nejnižší prioritu (nejdéle nepoužitá)
+    uint8_t lowestQueue = 255;
     
     for (auto& voice : voices_) {
         if (voice->isInactive()) {
@@ -578,13 +550,6 @@ SynthVoice* VoiceManager::findBestFreeVoice()
                 lowestQueue = currentQueue;
             }
         }
-    }
-    
-    if (bestCandidate) {
-        logger_.log("VoiceManager/findBestFreeVoice", "debug", 
-                   "Found free voice with queue priority " + juce::String((int)lowestQueue));
-    } else {
-        logger_.log("VoiceManager/findBestFreeVoice", "debug", "No free voices available");
     }
     
     return bestCandidate;
@@ -599,8 +564,8 @@ SynthVoice* VoiceManager::findBestFreeVoice()
 SynthVoice* VoiceManager::findBestReleaseCandidate()
 {
     SynthVoice* bestCandidate = nullptr;
-    uint8_t lowestQueue = 255;          // Nejstarší = nejnižší queue
-    uint32_t highestCounter = 0;        // Nejvíce pokročilý release counter
+    uint8_t lowestQueue = 255;
+    uint32_t highestCounter = 0;
     
     for (auto& voice : voices_) {
         if (voice->isInRelease()) {
@@ -608,7 +573,6 @@ SynthVoice* VoiceManager::findBestReleaseCandidate()
             uint32_t releaseRemaining = voice->getReleaseCounterRemaining();
             uint32_t releaseElapsed = SynthVoice::RELEASE_DURATION_SAMPLES - releaseRemaining;
             
-            // Priorita: nejnižší queue (nejstarší), při shodě nejvyšší release progress
             if (currentQueue < lowestQueue || 
                 (currentQueue == lowestQueue && releaseElapsed > highestCounter)) {
                 bestCandidate = voice.get();
@@ -616,15 +580,6 @@ SynthVoice* VoiceManager::findBestReleaseCandidate()
                 highestCounter = releaseElapsed;
             }
         }
-    }
-    
-    if (bestCandidate) {
-        uint32_t remaining = bestCandidate->getReleaseCounterRemaining();
-        logger_.log("VoiceManager/findBestReleaseCandidate", "debug", 
-                   "Found release voice: queue=" + juce::String((int)lowestQueue) + 
-                   " remaining=" + juce::String(remaining) + " samples");
-    } else {
-        logger_.log("VoiceManager/findBestReleaseCandidate", "debug", "No release voices available");
     }
     
     return bestCandidate;
@@ -639,15 +594,14 @@ SynthVoice* VoiceManager::findBestReleaseCandidate()
 SynthVoice* VoiceManager::findBestPlayingCandidate()
 {
     SynthVoice* bestCandidate = nullptr;
-    uint8_t lowestQueue = 255;      // Nejstarší = nejnižší queue
-    float highestProgress = 0.0f;   // Nejvíce dokončený = nejmenší disruption
+    uint8_t lowestQueue = 255;
+    float highestProgress = 0.0f;
     
     for (auto& voice : voices_) {
         if (voice->isPlaying()) {
             uint8_t currentQueue = voice->getQueue();
             float currentProgress = voice->getProgress();
             
-            // Priorita: nejnižší queue (nejstarší), při shodě nejvyšší progress
             if (currentQueue < lowestQueue || 
                 (currentQueue == lowestQueue && currentProgress > highestProgress)) {
                 bestCandidate = voice.get();
@@ -655,14 +609,6 @@ SynthVoice* VoiceManager::findBestPlayingCandidate()
                 highestProgress = currentProgress;
             }
         }
-    }
-    
-    if (bestCandidate) {
-        logger_.log("VoiceManager/findBestPlayingCandidate", "warn", 
-                   "Found playing voice for stealing: queue=" + juce::String((int)lowestQueue) + 
-                   " progress=" + juce::String(highestProgress * 100.0f, 1) + "% (DISRUPTIVE!)");
-    } else {
-        logger_.log("VoiceManager/findBestPlayingCandidate", "error", "No playing voices found - this should not happen!");
     }
     
     return bestCandidate;
@@ -690,9 +636,6 @@ void VoiceManager::assignTopPriority(SynthVoice* voice)
     // Přiřaď o 1 vyšší prioritu (pokud možno)
     uint8_t newQueue = (maxQueue < 254) ? (maxQueue + 1) : 254;
     voice->setQueue(newQueue);
-    
-    logger_.log("VoiceManager/assignTopPriority", "debug", 
-               "Assigned top priority: queue=" + juce::String((int)newQueue));
 }
 
 /**
@@ -703,10 +646,7 @@ void VoiceManager::assignTopPriority(SynthVoice* voice)
 void VoiceManager::demotePriority(SynthVoice* voice)
 {
     if (!voice) return;
-    
-    voice->setQueue(0);  // Nejnižší priorita pro neaktivní voices
-    
-    logger_.log("VoiceManager/demotePriority", "debug", "Voice demoted to lowest priority");
+    voice->setQueue(0);
 }
 
 // === STATISTICS AND DIAGNOSTICS ===
